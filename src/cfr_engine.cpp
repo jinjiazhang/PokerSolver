@@ -329,11 +329,14 @@ void CFRSolver::solve() {
             double avg_ms = elapsed * 1000.0 / iter;
             double eta = avg_ms * (config_.num_iterations - iter) / 1000.0;
             
+            double exploit = compute_exploitability();
+            
             std::cout << "  Iter " << std::setw(4) << iter 
                       << " | " << std::fixed << std::setprecision(1) 
                       << iter_ms << " ms"
                       << " | avg " << avg_ms << " ms"
                       << " | ETA " << std::setprecision(0) << eta << "s"
+                      << " | exploit " << std::setprecision(3) << exploit << "%"
                       << std::endl;
         }
     }
@@ -1058,8 +1061,222 @@ void CFRSolver::get_strategy(int node_index, const Hand& hand, int player,
     storage_.get_average_strategy(node_index, ci, num_actions, strategy.data());
 }
 
-double CFRSolver::get_exploitability() const {
-    return -1.0; // TODO: implement full best response computation
+// ============================================================================
+// Best Response / Exploitability computation
+//
+// For each player, compute the value of playing the BEST possible strategy
+// against the opponent's average (converged) strategy. If the converged
+// strategy is a perfect Nash equilibrium, the best response value equals
+// the game value, and exploitability is zero.
+//
+// Exploitability = (BR_value_player0 + BR_value_player1) / pot
+// ============================================================================
+
+void CFRSolver::best_response_traverse(
+    const GameTreeNode* node,
+    int br_player,
+    const std::vector<float>& oop_reach,
+    const std::vector<float>& ip_reach,
+    std::vector<float>& hand_values,
+    CardMask dead_cards) const
+{
+    if (!node) return;
+
+    // Terminal / fold nodes: compute payoffs as usual
+    if (node->is_terminal() || node->type == NodeType::FOLD) {
+        if (node->type == NodeType::FOLD) {
+            compute_fold_payoffs(br_player, node->player, node->pot,
+                                 oop_reach, ip_reach, hand_values, dead_cards);
+        } else {
+            compute_showdown_payoffs(br_player, node->pot,
+                                     oop_reach, ip_reach, hand_values, dead_cards);
+        }
+        return;
+    }
+
+    // Chance node
+    if (node->is_chance()) {
+        best_response_chance(node, br_player, oop_reach, ip_reach,
+                             hand_values, dead_cards);
+        return;
+    }
+
+    // Player node
+    int acting_player = node->player;
+    const auto& acting_range = get_range(acting_player);
+    const auto& trav_range = get_range(br_player);
+    int num_actions = node->num_actions();
+    int num_acting_hands = static_cast<int>(acting_range.size());
+    int num_trav_hands = static_cast<int>(trav_range.size());
+
+    // Get average strategy for the acting player (the converged strategy)
+    std::vector<std::vector<float>> strategies(num_acting_hands, std::vector<float>(num_actions));
+    for (int h = 0; h < num_acting_hands; ++h) {
+        int ci = get_canonical_index(acting_player, h);
+        storage_.get_average_strategy(node->node_index, ci, num_actions, strategies[h].data());
+    }
+
+    if (acting_player == br_player) {
+        // BR player's node: pick the action that maximizes value FOR EACH HAND
+        std::vector<std::vector<float>> action_values(num_actions,
+            std::vector<float>(num_trav_hands, 0.0f));
+
+        for (int a = 0; a < num_actions; ++a) {
+            std::vector<float> new_oop_reach, new_ip_reach;
+
+            if (br_player == 0) {
+                // BR player is OOP: for BR, reach = 1 for all hands (we try each)
+                // But we need to pass through the reach for the subtree correctly
+                // For BR player, we don't scale reach by strategy (we try each action independently)
+                new_oop_reach = oop_reach; // BR player reach stays as-is
+                new_ip_reach = ip_reach;
+            } else {
+                new_oop_reach = oop_reach;
+                new_ip_reach = ip_reach; // BR player reach stays as-is
+            }
+
+            best_response_traverse(node->children[a].get(), br_player,
+                                   new_oop_reach, new_ip_reach, action_values[a],
+                                   dead_cards);
+        }
+
+        // For each hand, pick the action with the highest value
+        hand_values.assign(num_trav_hands, 0.0f);
+        for (int h = 0; h < num_trav_hands; ++h) {
+            float best_val = action_values[0][h];
+            for (int a = 1; a < num_actions; ++a) {
+                best_val = std::max(best_val, action_values[a][h]);
+            }
+            hand_values[h] = best_val;
+        }
+
+    } else {
+        // Opponent's node: follow opponent's average strategy
+        std::vector<std::vector<float>> action_values(num_actions,
+            std::vector<float>(num_trav_hands, 0.0f));
+
+        for (int a = 0; a < num_actions; ++a) {
+            std::vector<float> new_oop_reach, new_ip_reach;
+
+            if (acting_player == 0) {
+                new_oop_reach.resize(oop_reach.size());
+                for (int h = 0; h < num_acting_hands; ++h) {
+                    new_oop_reach[h] = oop_reach[h] * strategies[h][a];
+                }
+                new_ip_reach = ip_reach;
+            } else {
+                new_oop_reach = oop_reach;
+                new_ip_reach.resize(ip_reach.size());
+                for (int h = 0; h < num_acting_hands; ++h) {
+                    new_ip_reach[h] = ip_reach[h] * strategies[h][a];
+                }
+            }
+
+            best_response_traverse(node->children[a].get(), br_player,
+                                   new_oop_reach, new_ip_reach, action_values[a],
+                                   dead_cards);
+        }
+
+        // Sum action values (opponent's strategy is incorporated via reach)
+        hand_values.assign(num_trav_hands, 0.0f);
+        for (int a = 0; a < num_actions; ++a) {
+            for (int h = 0; h < num_trav_hands; ++h) {
+                hand_values[h] += action_values[a][h];
+            }
+        }
+    }
+}
+
+void CFRSolver::best_response_chance(
+    const GameTreeNode* node,
+    int br_player,
+    const std::vector<float>& oop_reach,
+    const std::vector<float>& ip_reach,
+    std::vector<float>& hand_values,
+    CardMask dead_cards) const
+{
+    const auto& trav_range = get_range(br_player);
+    int num_trav_hands = static_cast<int>(trav_range.size());
+    hand_values.assign(num_trav_hands, 0.0f);
+
+    int num_deals = 0;
+
+    for (int card = 0; card < NUM_CARDS; ++card) {
+        if (mask_has_card(dead_cards, card)) continue;
+
+        CardMask new_dead = mask_add_card(dead_cards, card);
+
+        std::vector<float> new_oop_reach(oop_reach.size());
+        for (int h = 0; h < static_cast<int>(oop_range_.size()); ++h) {
+            new_oop_reach[h] = mask_has_card(oop_range_[h].mask(), card) ? 0.0f : oop_reach[h];
+        }
+
+        std::vector<float> new_ip_reach(ip_reach.size());
+        for (int h = 0; h < static_cast<int>(ip_range_.size()); ++h) {
+            new_ip_reach[h] = mask_has_card(ip_range_[h].mask(), card) ? 0.0f : ip_reach[h];
+        }
+
+        std::vector<float> card_values(num_trav_hands, 0.0f);
+        best_response_traverse(node->children[0].get(), br_player,
+                               new_oop_reach, new_ip_reach, card_values, new_dead);
+
+        for (int h = 0; h < num_trav_hands; ++h) {
+            hand_values[h] += card_values[h];
+        }
+        num_deals++;
+    }
+
+    if (num_deals > 0) {
+        float inv = 1.0f / num_deals;
+        for (int h = 0; h < num_trav_hands; ++h) {
+            hand_values[h] *= inv;
+        }
+    }
+}
+
+double CFRSolver::compute_exploitability() const {
+    int num_oop = static_cast<int>(oop_range_.size());
+    int num_ip = static_cast<int>(ip_range_.size());
+
+    double ev_sum = 0.0;
+
+    for (int br_player = 0; br_player < 2; ++br_player) {
+        const auto& trav_range = get_range(br_player);
+        const auto& opp_range = get_range(1 - br_player);
+        int num_trav = static_cast<int>(trav_range.size());
+        int num_opp = static_cast<int>(opp_range.size());
+
+        std::vector<float> oop_reach(num_oop, 1.0f);
+        std::vector<float> ip_reach(num_ip, 1.0f);
+        std::vector<float> hand_values(num_trav, 0.0f);
+
+        best_response_traverse(root_.get(), br_player, oop_reach, ip_reach,
+                               hand_values, game_params_.board.mask);
+
+        double total_ev = 0.0;
+        int valid_hands = 0;
+        for (int h = 0; h < num_trav; ++h) {
+            if (trav_range[h].conflicts_with(game_params_.board.mask)) continue;
+            
+            int opp_count = 0;
+            for (int o = 0; o < num_opp; ++o) {
+                if (opp_range[o].conflicts_with(game_params_.board.mask)) continue;
+                if (trav_range[h].mask() & opp_range[o].mask()) continue;
+                opp_count++;
+            }
+            
+            if (opp_count > 0) {
+                total_ev += hand_values[h] / opp_count;
+            }
+            valid_hands++;
+        }
+
+        if (valid_hands > 0) {
+            ev_sum += total_ev / valid_hands;
+        }
+    }
+
+    return ev_sum / game_params_.initial_pot * 100.0;
 }
 
 std::string CFRSolver::export_json() const {

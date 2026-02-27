@@ -165,8 +165,8 @@ public:
     void get_strategy(int node_index, const Hand& hand, int player,
                       std::vector<float>& strategy) const;
 
-    // Get exploitability (nash distance) approximate
-    double get_exploitability() const;
+    // Compute exploitability as % of pot (best response sum)
+    double compute_exploitability() const;
 
     // Export results to JSON
     std::string export_json() const;
@@ -297,6 +297,25 @@ private:
 
     // Merge all thread-local accumulators into global storage
     void merge_accumulators();
+
+    // Best response traversal for exploitability computation
+    // Traverses game tree: at br_player's nodes picks max-value action,
+    // at opponent's nodes follows their average strategy
+    void best_response_traverse(
+        const GameTreeNode* node,
+        int br_player,
+        const std::vector<float>& oop_reach,
+        const std::vector<float>& ip_reach,
+        std::vector<float>& hand_values,
+        CardMask dead_cards) const;
+
+    void best_response_chance(
+        const GameTreeNode* node,
+        int br_player,
+        const std::vector<float>& oop_reach,
+        const std::vector<float>& ip_reach,
+        std::vector<float>& hand_values,
+        CardMask dead_cards) const;
 
     // Compute showdown payoffs
     void compute_showdown_payoffs(
