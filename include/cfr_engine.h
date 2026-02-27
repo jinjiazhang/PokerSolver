@@ -7,6 +7,9 @@
 #include <atomic>
 #include <mutex>
 #include <functional>
+#include <thread>
+#include <condition_variable>
+#include <queue>
 
 namespace poker {
 
@@ -14,10 +17,10 @@ namespace poker {
 // CFR Engine - Discounted Counterfactual Regret Minimization
 //
 // Implements DCFR with the following optimizations:
-// - Compact int16 storage for regrets and strategy sums
-// - Cache-friendly memory layout (SoA for regrets/strategies)
-// - Multi-threaded parallelism over card deals
-// - Suit isomorphism to reduce information sets
+// - Compact float storage for regrets and strategy sums
+// - Cache-friendly memory layout (flat arrays for regrets/strategies)
+// - Multi-threaded parallelism over chance node deal-outs
+// - Thread-local accumulators to avoid lock contention
 // ============================================================================
 
 // Information set key: uniquely identifies a player's information at a node
@@ -65,6 +68,23 @@ public:
     // Get total allocated memory in bytes
     size_t memory_usage() const;
 
+    // Accessors for parallel accumulation
+    int num_nodes() const { return num_nodes_; }
+    int max_hands() const { return max_hands_; }
+    int max_actions() const { return max_actions_; }
+    size_t total_entries() const { return regrets_.size(); }
+
+    // Direct access for merging thread-local accumulators
+    float* regret_data() { return regrets_.data(); }
+    float* strategy_sum_data() { return strategy_sums_.data(); }
+    const float* regret_data() const { return regrets_.data(); }
+    const float* strategy_sum_data() const { return strategy_sums_.data(); }
+
+    size_t index(int node, int hand, int action) const {
+        return static_cast<size_t>(node) * max_hands_ * max_actions_ + 
+               static_cast<size_t>(hand) * max_actions_ + action;
+    }
+
 private:
     int num_nodes_ = 0;
     int max_hands_ = 0;
@@ -74,11 +94,30 @@ private:
     // Flat arrays for cache efficiency
     std::vector<float> regrets_;
     std::vector<float> strategy_sums_;
-    
-    size_t index(int node, int hand, int action) const {
-        return static_cast<size_t>(node) * max_hands_ * max_actions_ + 
-               static_cast<size_t>(hand) * max_actions_ + action;
-    }
+};
+
+// ============================================================================
+// Thread-local accumulator for lock-free parallel CFR
+// Each thread writes regret/strategy deltas to its own accumulator,
+// which are merged into the global StrategyStorage after traversal.
+// ============================================================================
+class ThreadLocalAccumulator {
+public:
+    ThreadLocalAccumulator() = default;
+
+    void init(size_t total_entries);
+    void clear();
+
+    float& regret_delta(size_t flat_index) { return regret_deltas_[flat_index]; }
+    float& strategy_delta(size_t flat_index) { return strategy_deltas_[flat_index]; }
+
+    const float* regret_data() const { return regret_deltas_.data(); }
+    const float* strategy_data() const { return strategy_deltas_.data(); }
+    size_t size() const { return regret_deltas_.size(); }
+
+private:
+    std::vector<float> regret_deltas_;
+    std::vector<float> strategy_deltas_;
 };
 
 // ============================================================================
@@ -92,7 +131,7 @@ struct ShowdownResult {
 };
 
 // ============================================================================
-// CFR Solver
+// CFR Solver - with multi-threaded parallel iteration support
 // ============================================================================
 class CFRSolver {
 public:
@@ -151,11 +190,10 @@ private:
     std::vector<int> ip_hand_map_;
 
     // Precomputed showdown equities for river evaluation
-    // Cached per board state
     struct BoardEquity {
         CardMask board_mask;
-        std::vector<uint16_t> oop_ranks; // eval rank for each OOP hand
-        std::vector<uint16_t> ip_ranks;  // eval rank for each IP hand
+        std::vector<uint16_t> oop_ranks;
+        std::vector<uint16_t> ip_ranks;
     };
 
     // Precomputed hand ranks for the current board
@@ -163,18 +201,18 @@ private:
     std::vector<uint16_t> ip_hand_ranks_;
     
     // Precomputed matchup results: matchup_cache_[oop_idx * ip_size + ip_idx]
-    // Values: +1 (oop wins), -1 (ip wins), 0 (tie)
-    // Only valid for non-conflicting hand pairs
     std::vector<int8_t> matchup_cache_;
     bool has_precomputed_matchups_ = false;
+    
+    // Thread-local accumulators (one per thread)
+    std::vector<ThreadLocalAccumulator> thread_accumulators_;
     
     // Precompute hand ranks and matchups
     void precompute_matchups(CardMask board_mask);
     
-    // CFR traversal
+    // ---- Single-threaded CFR traversal ----
     void cfr_iteration(int iteration);
     
-    // Recursive CFR traversal for one player
     void cfr_traverse(
         const GameTreeNode* node,
         int traversing_player,
@@ -200,6 +238,41 @@ private:
         std::vector<float>& hand_values,
         CardMask dead_cards,
         int iteration);
+
+    // ---- Multi-threaded CFR traversal ----
+    // Parallel iteration: dispatches work across threads
+    void cfr_iteration_parallel(int iteration);
+
+    // Thread-local CFR traverse: writes deltas to accumulator instead of storage
+    void cfr_traverse_threaded(
+        const GameTreeNode* node,
+        int traversing_player,
+        const std::vector<float>& oop_reach,
+        const std::vector<float>& ip_reach,
+        std::vector<float>& hand_values,
+        CardMask dead_cards,
+        int iteration,
+        ThreadLocalAccumulator& accum);
+
+    void cfr_traverse_terminal_threaded(
+        const GameTreeNode* node,
+        int traversing_player,
+        const std::vector<float>& oop_reach,
+        const std::vector<float>& ip_reach,
+        std::vector<float>& hand_values,
+        CardMask dead_cards);
+
+    void cfr_traverse_chance_parallel(
+        const GameTreeNode* node,
+        int traversing_player,
+        const std::vector<float>& oop_reach,
+        const std::vector<float>& ip_reach,
+        std::vector<float>& hand_values,
+        CardMask dead_cards,
+        int iteration);
+
+    // Merge all thread-local accumulators into global storage
+    void merge_accumulators();
 
     // Compute showdown payoffs
     void compute_showdown_payoffs(
