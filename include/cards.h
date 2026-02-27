@@ -113,6 +113,15 @@ struct Board {
 
 // ============================================================================
 // Suit isomorphism - canonical mapping to reduce information sets
+//
+// Two hands are suit-isomorphic on a given board if there exists a
+// permutation of suits that maps one hand to the other while keeping
+// the board unchanged. Such hands must play the same strategy.
+//
+// We compute a "suit signature" for each hand:
+//   For each of the hand's two cards, record how many board cards share
+//   the same suit. Then we construct a canonical form by relabeling suits
+//   in order of first appearance (board first, then hand).
 // ============================================================================
 struct SuitMapping {
     std::array<int, 4> map;  // original suit -> canonical suit
@@ -124,6 +133,33 @@ struct SuitMapping {
 
 // Get canonical suit mapping for a board + hand combination
 SuitMapping get_canonical_suit_mapping(const Board& board, int hand_card0, int hand_card1);
+
+// Compute canonical hand for a given board
+// Returns a Hand with cards remapped to canonical suit ordering
+struct Hand; // forward declaration
+Hand get_canonical_hand(const Board& board, const Hand& hand);
+
+// ============================================================================
+// Suit isomorphism mapping for a range
+// Maps each hand in a range to its canonical index.
+// Hands that are suit-isomorphic share the same canonical index.
+// ============================================================================
+struct IsomorphismMap {
+    // For each hand index in the range, its canonical group index
+    std::vector<int> hand_to_canonical;
+    
+    // Number of unique canonical groups
+    int num_canonical;
+    
+    // For each canonical group, list of original hand indices in the range
+    std::vector<std::vector<int>> canonical_to_hands;
+    
+    // For each canonical group, pick one representative hand index
+    std::vector<int> canonical_representative;
+};
+
+// Build isomorphism map for a range on a given board
+IsomorphismMap build_isomorphism_map(const Board& board, const std::vector<Hand>& range);
 
 // ============================================================================
 // Hand (private cards, 2 cards)
@@ -153,6 +189,15 @@ struct Hand {
 
     std::string to_string() const {
         return card_to_string(cards[0]) + card_to_string(cards[1]);
+    }
+
+    bool operator==(const Hand& o) const {
+        return cards[0] == o.cards[0] && cards[1] == o.cards[1];
+    }
+    
+    bool operator<(const Hand& o) const {
+        if (cards[0] != o.cards[0]) return cards[0] < o.cards[0];
+        return cards[1] < o.cards[1];
     }
 };
 

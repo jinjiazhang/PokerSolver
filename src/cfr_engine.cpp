@@ -23,7 +23,6 @@ void StrategyStorage::init(int num_player_nodes, int max_hands,
     max_hands_ = max_hands;
     actions_per_node_ = actions_per_node;
 
-    // Find max actions
     max_actions_ = 0;
     for (int a : actions_per_node_) {
         max_actions_ = std::max(max_actions_, a);
@@ -52,7 +51,6 @@ float StrategyStorage::strategy_sum(int node_idx, int hand_idx, int action_idx) 
 
 void StrategyStorage::get_current_strategy(int node_idx, int hand_idx, 
                                             int num_actions, float* strategy) const {
-    // Regret matching: strategy proportional to positive regrets
     float sum = 0;
     for (int a = 0; a < num_actions; ++a) {
         float r = regrets_[index(node_idx, hand_idx, a)];
@@ -66,7 +64,6 @@ void StrategyStorage::get_current_strategy(int node_idx, int hand_idx,
             strategy[a] *= inv;
         }
     } else {
-        // Uniform strategy if no positive regrets
         float uniform = 1.0f / num_actions;
         for (int a = 0; a < num_actions; ++a) {
             strategy[a] = uniform;
@@ -97,16 +94,9 @@ void StrategyStorage::get_average_strategy(int node_idx, int hand_idx,
 }
 
 void StrategyStorage::discount(int iteration) {
-    // DCFR discounting scheme:
-    // Positive regrets: multiply by t^alpha / (t^alpha + 1)
-    // Negative regrets: multiply by t^beta / (t^beta + 1)  
-    // Strategy sums:   multiply by (t / (t+1))^gamma
-    
     double t = static_cast<double>(iteration);
-    
-    // Default DCFR params: alpha=1.5, beta=0, gamma=2
     double pos_discount = std::pow(t, 1.5) / (std::pow(t, 1.5) + 1.0);
-    double neg_discount = 0.0; // beta=0 means forget negative regrets completely
+    double neg_discount = 0.0;
     double strat_discount = std::pow(t / (t + 1.0), 2.0);
 
     size_t total = regrets_.size();
@@ -170,6 +160,30 @@ void CFRSolver::build_hand_maps() {
     }
 }
 
+// ============================================================================
+// Build suit isomorphism maps
+// ============================================================================
+
+void CFRSolver::build_isomorphism() {
+    oop_iso_ = build_isomorphism_map(game_params_.board, oop_range_);
+    ip_iso_ = build_isomorphism_map(game_params_.board, ip_range_);
+    isomorphism_enabled_ = true;
+
+    std::cout << "  Suit isomorphism:" << std::endl;
+    std::cout << "    OOP: " << oop_range_.size() << " hands -> " 
+              << oop_iso_.num_canonical << " canonical groups ("
+              << std::fixed << std::setprecision(0)
+              << (100.0 * (1.0 - static_cast<double>(oop_iso_.num_canonical) / 
+                  std::max(1, static_cast<int>(oop_range_.size()))))
+              << "% reduction)" << std::endl;
+    std::cout << "    IP:  " << ip_range_.size() << " hands -> " 
+              << ip_iso_.num_canonical << " canonical groups ("
+              << std::fixed << std::setprecision(0)
+              << (100.0 * (1.0 - static_cast<double>(ip_iso_.num_canonical) / 
+                  std::max(1, static_cast<int>(ip_range_.size()))))
+              << "% reduction)" << std::endl;
+}
+
 void CFRSolver::build() {
     std::cout << "Building game tree..." << std::endl;
     root_ = builder_.build();
@@ -178,6 +192,11 @@ void CFRSolver::build() {
     std::cout << "  Total nodes:  " << builder_.num_total_nodes() << std::endl;
 
     build_hand_maps();
+
+    // Build suit isomorphism if enabled
+    if (config_.use_isomorphism) {
+        build_isomorphism();
+    }
 
     // Count actions per node
     std::vector<int> actions_per_node(builder_.num_player_nodes(), 0);
@@ -193,8 +212,15 @@ void CFRSolver::build() {
     };
     count_actions(root_.get());
 
-    int max_hands = std::max(static_cast<int>(oop_range_.size()), 
+    // With isomorphism, max_hands = max of canonical group counts
+    // Without, max_hands = max of range sizes
+    int max_hands;
+    if (isomorphism_enabled_) {
+        max_hands = std::max(oop_iso_.num_canonical, ip_iso_.num_canonical);
+    } else {
+        max_hands = std::max(static_cast<int>(oop_range_.size()), 
                              static_cast<int>(ip_range_.size()));
+    }
     
     storage_.init(builder_.num_player_nodes(), max_hands, actions_per_node);
 
@@ -227,7 +253,6 @@ void CFRSolver::precompute_matchups(CardMask board_mask) {
     int num_ip = static_cast<int>(ip_range_.size());
     int board_count = mask_count(board_mask & FULL_DECK_MASK);
 
-    // Precompute hand ranks
     oop_hand_ranks_.resize(num_oop);
     ip_hand_ranks_.resize(num_ip);
 
@@ -246,7 +271,6 @@ void CFRSolver::precompute_matchups(CardMask board_mask) {
         }
     }
 
-    // Precompute all OOP vs IP matchup results
     matchup_cache_.resize(static_cast<size_t>(num_oop) * num_ip, 0);
     for (int t = 0; t < num_oop; ++t) {
         if (oop_hand_ranks_[t] == 0) continue;
@@ -265,7 +289,7 @@ void CFRSolver::precompute_matchups(CardMask board_mask) {
 }
 
 // ============================================================================
-// Solve entry point - dispatches to single-threaded or parallel
+// Solve entry point
 // ============================================================================
 
 void CFRSolver::solve() {
@@ -275,6 +299,9 @@ void CFRSolver::solve() {
     std::cout << "\nStarting DCFR solver (" << config_.num_iterations << " iterations";
     if (use_parallel) {
         std::cout << ", " << num_threads << " threads";
+    }
+    if (isomorphism_enabled_) {
+        std::cout << ", isomorphism";
     }
     std::cout << ")...\n";
     std::cout << std::string(60, '=') << std::endl;
@@ -324,22 +351,18 @@ void CFRSolver::solve() {
 }
 
 // ============================================================================
-// Single-threaded CFR iteration (unchanged original logic)
+// Single-threaded CFR iteration
 // ============================================================================
 
 void CFRSolver::cfr_iteration(int iteration) {
-    // Run CFR traversal for both players
     for (int traverser = 0; traverser < 2; ++traverser) {
         const auto& trav_range = get_range(traverser);
         int num_trav_hands = static_cast<int>(trav_range.size());
         int num_oop_hands = static_cast<int>(oop_range_.size());
         int num_ip_hands = static_cast<int>(ip_range_.size());
 
-        // Initialize reach probabilities to 1.0 for all hands
         std::vector<float> oop_reach(num_oop_hands, 1.0f);
         std::vector<float> ip_reach(num_ip_hands, 1.0f);
-
-        // Output hand values
         std::vector<float> hand_values(num_trav_hands, 0.0f);
 
         cfr_traverse(root_.get(), traverser, oop_reach, ip_reach, 
@@ -379,18 +402,18 @@ void CFRSolver::cfr_traverse(
     int num_trav_hands = static_cast<int>(trav_range.size());
 
     // Get current strategy for all hands of the acting player
+    // Use canonical index for storage lookup
     std::vector<std::vector<float>> strategies(num_acting_hands, std::vector<float>(num_actions));
     for (int h = 0; h < num_acting_hands; ++h) {
-        storage_.get_current_strategy(node->node_index, h, num_actions, strategies[h].data());
+        int ci = get_canonical_index(acting_player, h);
+        storage_.get_current_strategy(node->node_index, ci, num_actions, strategies[h].data());
     }
 
     if (acting_player == traversing_player) {
-        // Traverser's node: compute action values and update regrets
         std::vector<std::vector<float>> action_values(num_actions, 
             std::vector<float>(num_trav_hands, 0.0f));
 
         for (int a = 0; a < num_actions; ++a) {
-            // Compute new reach probs for this action
             std::vector<float> new_oop_reach, new_ip_reach;
             
             if (traversing_player == 0) {
@@ -412,7 +435,7 @@ void CFRSolver::cfr_traverse(
                          dead_cards, iteration);
         }
 
-        // Compute node values and update regrets
+        // Compute node values
         hand_values.assign(num_trav_hands, 0.0f);
         for (int h = 0; h < num_trav_hands; ++h) {
             for (int a = 0; a < num_actions; ++a) {
@@ -420,25 +443,26 @@ void CFRSolver::cfr_traverse(
             }
         }
 
-        // Update regrets
+        // Update regrets using canonical index
         for (int h = 0; h < num_trav_hands; ++h) {
+            int ci = get_canonical_index(traversing_player, h);
             for (int a = 0; a < num_actions; ++a) {
                 float regret_delta = action_values[a][h] - hand_values[h];
-                storage_.regret(node->node_index, h, a) += regret_delta;
+                storage_.regret(node->node_index, ci, a) += regret_delta;
             }
         }
 
-        // Update strategy sums (weighted by reach probability)
+        // Update strategy sums using canonical index
         const auto& reach = (traversing_player == 0) ? oop_reach : ip_reach;
         for (int h = 0; h < num_trav_hands; ++h) {
+            int ci = get_canonical_index(traversing_player, h);
             for (int a = 0; a < num_actions; ++a) {
-                storage_.strategy_sum(node->node_index, h, a) += 
+                storage_.strategy_sum(node->node_index, ci, a) += 
                     reach[h] * strategies[h][a];
             }
         }
 
     } else {
-        // Opponent's node: sum over all opponent actions weighted by strategy
         std::vector<std::vector<float>> action_values(num_actions,
             std::vector<float>(num_trav_hands, 0.0f));
 
@@ -464,7 +488,6 @@ void CFRSolver::cfr_traverse(
                          dead_cards, iteration);
         }
 
-        // Sum action values (they already incorporate opponent's strategy via reach)
         hand_values.assign(num_trav_hands, 0.0f);
         for (int a = 0; a < num_actions; ++a) {
             for (int h = 0; h < num_trav_hands; ++h) {
@@ -486,7 +509,6 @@ void CFRSolver::cfr_traverse_terminal(
         compute_fold_payoffs(traversing_player, node->player, node->pot,
                              oop_reach, ip_reach, hand_values, dead_cards);
     } else {
-        // Showdown
         compute_showdown_payoffs(traversing_player, node->pot,
                                  oop_reach, ip_reach, hand_values, dead_cards);
     }
@@ -501,7 +523,6 @@ void CFRSolver::cfr_traverse_chance(
     CardMask dead_cards,
     int iteration)
 {
-    // Chance node: deal a new community card
     const auto& trav_range = get_range(traversing_player);
     int num_trav_hands = static_cast<int>(trav_range.size());
     hand_values.assign(num_trav_hands, 0.0f);
@@ -513,7 +534,6 @@ void CFRSolver::cfr_traverse_chance(
 
         CardMask new_dead = mask_add_card(dead_cards, card);
         
-        // Filter hands that conflict with the dealt card
         std::vector<float> new_oop_reach(oop_reach.size());
         for (int h = 0; h < static_cast<int>(oop_range_.size()); ++h) {
             if (mask_has_card(oop_range_[h].mask(), card)) {
@@ -544,7 +564,6 @@ void CFRSolver::cfr_traverse_chance(
         num_deals++;
     }
 
-    // Average over deals
     if (num_deals > 0) {
         float inv = 1.0f / num_deals;
         for (int h = 0; h < num_trav_hands; ++h) {
@@ -555,11 +574,6 @@ void CFRSolver::cfr_traverse_chance(
 
 // ============================================================================
 // Multi-threaded parallel CFR iteration
-//
-// Strategy: Parallelize at the FIRST chance node encountered in the tree.
-// Each deal card's subtree is independent and assigned to a thread.
-// Thread-local accumulators collect regret/strategy-sum deltas.
-// After all threads finish, accumulators are merged into global storage.
 // ============================================================================
 
 void CFRSolver::cfr_iteration_parallel(int iteration) {
@@ -573,40 +587,25 @@ void CFRSolver::cfr_iteration_parallel(int iteration) {
         std::vector<float> ip_reach(num_ip_hands, 1.0f);
         std::vector<float> hand_values(num_trav_hands, 0.0f);
 
-        // Clear all accumulators
         for (auto& accum : thread_accumulators_) {
             accum.clear();
         }
 
-        // Check if root is a chance node -> parallelize deal cards
-        // Otherwise, check if we encounter a chance node in the first 
-        // few levels (common in turn/river solve from flop)
         if (root_->is_chance()) {
-            // Root is chance node: parallelize directly over deal cards
             cfr_traverse_chance_parallel(root_.get(), traverser, oop_reach, ip_reach,
                                          hand_values, game_params_.board.mask, iteration);
         } else {
-            // Root is a player node: use threaded traversal that 
-            // parallelizes at the first chance node encountered deeper in the tree
-            // For now, traverse single-threaded until chance, then parallelize
-            
-            // Use thread-local accumulators with single traversal
-            // that spawns threads at chance nodes
             cfr_traverse_threaded(root_.get(), traverser, oop_reach, ip_reach,
                                   hand_values, game_params_.board.mask, iteration,
                                   thread_accumulators_[0]);
         }
 
-        // Merge all thread-local accumulators into global storage
         merge_accumulators();
     }
 }
 
 // ============================================================================
-// Thread-local CFR traversal
-// Same logic as cfr_traverse, but writes deltas to a ThreadLocalAccumulator
-// instead of directly to StrategyStorage. When it encounters a chance node,
-// it dispatches to the parallel chance traversal.
+// Thread-local CFR traversal (with isomorphism support)
 // ============================================================================
 
 void CFRSolver::cfr_traverse_threaded(
@@ -628,7 +627,6 @@ void CFRSolver::cfr_traverse_threaded(
     }
 
     if (node->is_chance()) {
-        // Dispatch to parallel chance traversal (spawns threads)
         cfr_traverse_chance_parallel(node, traversing_player, oop_reach, ip_reach,
                                      hand_values, dead_cards, iteration);
         return;
@@ -642,10 +640,11 @@ void CFRSolver::cfr_traverse_threaded(
     int num_acting_hands = static_cast<int>(acting_range.size());
     int num_trav_hands = static_cast<int>(trav_range.size());
 
-    // Get current strategy (reads from global storage - safe, read-only)
+    // Get current strategy using canonical index
     std::vector<std::vector<float>> strategies(num_acting_hands, std::vector<float>(num_actions));
     for (int h = 0; h < num_acting_hands; ++h) {
-        storage_.get_current_strategy(node->node_index, h, num_actions, strategies[h].data());
+        int ci = get_canonical_index(acting_player, h);
+        storage_.get_current_strategy(node->node_index, ci, num_actions, strategies[h].data());
     }
 
     if (acting_player == traversing_player) {
@@ -674,7 +673,6 @@ void CFRSolver::cfr_traverse_threaded(
                                   dead_cards, iteration, accum);
         }
 
-        // Compute node values
         hand_values.assign(num_trav_hands, 0.0f);
         for (int h = 0; h < num_trav_hands; ++h) {
             for (int a = 0; a < num_actions; ++a) {
@@ -682,20 +680,21 @@ void CFRSolver::cfr_traverse_threaded(
             }
         }
 
-        // Write regret deltas to thread-local accumulator
+        // Write regret deltas using canonical index
         for (int h = 0; h < num_trav_hands; ++h) {
+            int ci = get_canonical_index(traversing_player, h);
             for (int a = 0; a < num_actions; ++a) {
                 float regret_delta = action_values[a][h] - hand_values[h];
-                size_t idx = storage_.index(node->node_index, h, a);
+                size_t idx = storage_.index(node->node_index, ci, a);
                 accum.regret_delta(idx) += regret_delta;
             }
         }
 
-        // Write strategy sum deltas to thread-local accumulator
         const auto& reach = (traversing_player == 0) ? oop_reach : ip_reach;
         for (int h = 0; h < num_trav_hands; ++h) {
+            int ci = get_canonical_index(traversing_player, h);
             for (int a = 0; a < num_actions; ++a) {
-                size_t idx = storage_.index(node->node_index, h, a);
+                size_t idx = storage_.index(node->node_index, ci, a);
                 accum.strategy_delta(idx) += reach[h] * strategies[h][a];
             }
         }
@@ -743,7 +742,6 @@ void CFRSolver::cfr_traverse_terminal_threaded(
     std::vector<float>& hand_values,
     CardMask dead_cards)
 {
-    // Terminal nodes have no regrets to update, just compute payoffs
     if (node->type == NodeType::FOLD) {
         compute_fold_payoffs(traversing_player, node->player, node->pot,
                              oop_reach, ip_reach, hand_values, dead_cards);
@@ -755,8 +753,6 @@ void CFRSolver::cfr_traverse_terminal_threaded(
 
 // ============================================================================
 // Parallel chance node traversal
-// Each deal card's subtree gets assigned to a thread from the pool.
-// Each thread has its own accumulator for regret/strategy-sum deltas.
 // ============================================================================
 
 void CFRSolver::cfr_traverse_chance_parallel(
@@ -774,7 +770,6 @@ void CFRSolver::cfr_traverse_chance_parallel(
 
     int num_threads = std::max(1, config_.num_threads);
 
-    // Collect all valid deal cards
     std::vector<int> deal_cards;
     deal_cards.reserve(52);
     for (int card = 0; card < NUM_CARDS; ++card) {
@@ -786,8 +781,6 @@ void CFRSolver::cfr_traverse_chance_parallel(
     int num_deals = static_cast<int>(deal_cards.size());
     if (num_deals == 0) return;
 
-    // Each thread processes a contiguous chunk of deal cards
-    // and produces thread-local hand values + writes to its own accumulator
     struct ThreadResult {
         std::vector<float> partial_values;
         int num_deals_processed = 0;
@@ -798,7 +791,6 @@ void CFRSolver::cfr_traverse_chance_parallel(
         tr.partial_values.assign(num_trav_hands, 0.0f);
     }
 
-    // Worker function for each thread
     auto worker = [&](int thread_id, int start_deal, int end_deal) {
         ThreadLocalAccumulator& accum = thread_accumulators_[thread_id];
         auto& result = thread_results[thread_id];
@@ -807,7 +799,6 @@ void CFRSolver::cfr_traverse_chance_parallel(
             int card = deal_cards[d];
             CardMask new_dead = mask_add_card(dead_cards, card);
 
-            // Filter hands that conflict with the dealt card
             std::vector<float> new_oop_reach(oop_reach.size());
             for (int h = 0; h < static_cast<int>(oop_range_.size()); ++h) {
                 if (mask_has_card(oop_range_[h].mask(), card)) {
@@ -828,8 +819,6 @@ void CFRSolver::cfr_traverse_chance_parallel(
 
             std::vector<float> card_values(num_trav_hands, 0.0f);
 
-            // Traverse the child subtree using thread-local accumulator
-            // Note: children[0] is the shared subtree for all deal cards at a chance node
             cfr_traverse_threaded(node->children[0].get(), traversing_player,
                                   new_oop_reach, new_ip_reach, card_values,
                                   new_dead, iteration, accum);
@@ -841,7 +830,6 @@ void CFRSolver::cfr_traverse_chance_parallel(
         }
     };
 
-    // Distribute deal cards across threads
     std::vector<std::thread> threads;
     threads.reserve(num_threads);
 
@@ -860,12 +848,10 @@ void CFRSolver::cfr_traverse_chance_parallel(
         }
     }
 
-    // Wait for all threads
     for (auto& th : threads) {
         th.join();
     }
 
-    // Aggregate hand values from all threads
     int total_deals = 0;
     for (const auto& tr : thread_results) {
         for (int h = 0; h < num_trav_hands; ++h) {
@@ -874,7 +860,6 @@ void CFRSolver::cfr_traverse_chance_parallel(
         total_deals += tr.num_deals_processed;
     }
 
-    // Average over all deals
     if (total_deals > 0) {
         float inv = 1.0f / total_deals;
         for (int h = 0; h < num_trav_hands; ++h) {
@@ -884,7 +869,7 @@ void CFRSolver::cfr_traverse_chance_parallel(
 }
 
 // ============================================================================
-// Merge all thread-local accumulators into global StrategyStorage
+// Merge accumulators
 // ============================================================================
 
 void CFRSolver::merge_accumulators() {
@@ -928,7 +913,6 @@ void CFRSolver::compute_showdown_payoffs(
     float half_pot = static_cast<float>(pot / 2.0);
 
     if (has_precomputed_matchups_ && dead_cards == game_params_.board.mask) {
-        // Fast path: use precomputed matchup cache
         for (int t = 0; t < num_trav; ++t) {
             const Hand& trav_hand = trav_range[t];
             if (trav_hand.conflicts_with(dead_cards)) continue;
@@ -958,7 +942,6 @@ void CFRSolver::compute_showdown_payoffs(
             hand_values[t] = ev;
         }
     } else {
-        // Slow path: evaluate hands on the fly
         const auto& eval = get_evaluator();
         int board_count = mask_count(dead_cards & FULL_DECK_MASK);
 
@@ -1035,7 +1018,7 @@ void CFRSolver::compute_fold_payoffs(
 }
 
 // ============================================================================
-// Query / export (unchanged from original)
+// Query / export
 // ============================================================================
 
 void CFRSolver::get_strategy(int node_index, const Hand& hand, int player,
@@ -1069,7 +1052,10 @@ void CFRSolver::get_strategy(int node_index, const Hand& hand, int player,
 
     int num_actions = node->num_actions();
     strategy.resize(num_actions);
-    storage_.get_average_strategy(node_index, hand_idx, num_actions, strategy.data());
+    
+    // Use canonical index for strategy lookup
+    int ci = get_canonical_index(player, hand_idx);
+    storage_.get_average_strategy(node_index, ci, num_actions, strategy.data());
 }
 
 double CFRSolver::get_exploitability() const {
@@ -1082,6 +1068,7 @@ std::string CFRSolver::export_json() const {
     json << "  \"solver\": \"PokerSolver DCFR\",\n";
     json << "  \"iterations\": " << config_.num_iterations << ",\n";
     json << "  \"threads\": " << config_.num_threads << ",\n";
+    json << "  \"isomorphism\": " << (isomorphism_enabled_ ? "true" : "false") << ",\n";
     json << "  \"pot\": " << game_params_.initial_pot << ",\n";
     json << "  \"stack\": " << game_params_.effective_stack << ",\n";
     json << "  \"board\": \"";
@@ -1090,7 +1077,6 @@ std::string CFRSolver::export_json() const {
     }
     json << "\",\n";
 
-    // Export strategies for root node
     json << "  \"root_strategy\": {\n";
     
     const auto& root = root_;
@@ -1113,7 +1099,8 @@ std::string CFRSolver::export_json() const {
             const Hand& hand = range[h];
             if (hand.conflicts_with(game_params_.board.mask)) continue;
             
-            storage_.get_average_strategy(root->node_index, h, num_actions, strategy.data());
+            int ci = get_canonical_index(player, h);
+            storage_.get_average_strategy(root->node_index, ci, num_actions, strategy.data());
             
             if (h > 0) json << ",\n";
             json << "      \"" << hand.to_string() << "\": [";

@@ -21,6 +21,7 @@ namespace poker {
 // - Cache-friendly memory layout (flat arrays for regrets/strategies)
 // - Multi-threaded parallelism over chance node deal-outs
 // - Thread-local accumulators to avoid lock contention
+// - Suit isomorphism to reduce number of information sets
 // ============================================================================
 
 // Information set key: uniquely identifies a player's information at a node
@@ -37,6 +38,7 @@ struct InfoSetKey {
 // ============================================================================
 // Strategy storage - flat array layout for cache efficiency
 // For each player node, stores regrets and strategy sums for each hand/action
+// With suit isomorphism: hand_idx is the canonical group index, not range index
 // ============================================================================
 class StrategyStorage {
 public:
@@ -125,13 +127,12 @@ private:
 // ============================================================================
 struct ShowdownResult {
     // For each pair of non-conflicting hands, stores comparison result
-    // equity[h0][h1] = equity of h0 vs h1 (0.0, 0.5, or 1.0)
     std::vector<std::vector<float>> equity;
     int num_hands;
 };
 
 // ============================================================================
-// CFR Solver - with multi-threaded parallel iteration support
+// CFR Solver - with multi-threaded parallel iteration + suit isomorphism
 // ============================================================================
 class CFRSolver {
 public:
@@ -139,6 +140,7 @@ public:
         int num_iterations = 200;
         int num_threads = 1;
         bool use_dcfr = true;
+        bool use_isomorphism = true;   // enable suit isomorphism
         bool print_progress = true;
         int print_interval = 10;
         
@@ -189,6 +191,12 @@ private:
     std::vector<int> oop_hand_map_;
     std::vector<int> ip_hand_map_;
 
+    // Suit isomorphism mappings (one per player)
+    // Maps range index -> canonical index for strategy storage
+    IsomorphismMap oop_iso_;
+    IsomorphismMap ip_iso_;
+    bool isomorphism_enabled_ = false;
+
     // Precomputed showdown equities for river evaluation
     struct BoardEquity {
         CardMask board_mask;
@@ -210,6 +218,24 @@ private:
     // Precompute hand ranks and matchups
     void precompute_matchups(CardMask board_mask);
     
+    // Build suit isomorphism maps
+    void build_isomorphism();
+    
+    // Get canonical hand index for strategy storage lookup
+    // With isomorphism: returns canonical group index
+    // Without: returns range index directly
+    int get_canonical_index(int player, int hand_range_idx) const {
+        if (!isomorphism_enabled_) return hand_range_idx;
+        const auto& iso = (player == 0) ? oop_iso_ : ip_iso_;
+        int ci = iso.hand_to_canonical[hand_range_idx];
+        return (ci >= 0) ? ci : hand_range_idx;
+    }
+    
+    // Get isomorphism map for a player
+    const IsomorphismMap& get_iso(int player) const {
+        return (player == 0) ? oop_iso_ : ip_iso_;
+    }
+
     // ---- Single-threaded CFR traversal ----
     void cfr_iteration(int iteration);
     
@@ -240,10 +266,8 @@ private:
         int iteration);
 
     // ---- Multi-threaded CFR traversal ----
-    // Parallel iteration: dispatches work across threads
     void cfr_iteration_parallel(int iteration);
 
-    // Thread-local CFR traverse: writes deltas to accumulator instead of storage
     void cfr_traverse_threaded(
         const GameTreeNode* node,
         int traversing_player,
