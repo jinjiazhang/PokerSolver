@@ -181,6 +181,10 @@ public:
     // Set player ranges
     void set_oop_range(const std::vector<Hand>& range); // player 0
     void set_ip_range(const std::vector<Hand>& range);  // player 1
+    
+    // Set raw parsed string for range (for export)
+    void set_oop_range_str(const std::string& str) { oop_range_str_ = str; }
+    void set_ip_range_str(const std::string& str) { ip_range_str_ = str; }
 
     // Build tree and solve
     void build();
@@ -212,6 +216,8 @@ private:
     // Player ranges (hands that each player can hold)
     std::vector<Hand> oop_range_;
     std::vector<Hand> ip_range_;
+    std::string oop_range_str_;
+    std::string ip_range_str_;
     
     // Hand index mapping: hand combo_index -> range index
     std::vector<int> oop_hand_map_;
@@ -355,6 +361,22 @@ private:
     void best_response_chance(
         const GameTreeNode* node,
         int br_player,
+        const std::vector<float>& oop_reach,
+        const std::vector<float>& ip_reach,
+        std::vector<float>& hand_values,
+        CardMask dead_cards) const;
+
+    void evaluate_strategy_traverse(
+        const GameTreeNode* node,
+        int eval_player,
+        const std::vector<float>& oop_reach,
+        const std::vector<float>& ip_reach,
+        std::vector<float>& hand_values,
+        CardMask dead_cards) const;
+
+    void evaluate_strategy_chance(
+        const GameTreeNode* node,
+        int eval_player,
         const std::vector<float>& oop_reach,
         const std::vector<float>& ip_reach,
         std::vector<float>& hand_values,

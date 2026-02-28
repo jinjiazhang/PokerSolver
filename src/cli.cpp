@@ -205,6 +205,8 @@ void CLI::run() {
     CFRSolver solver(game_params_, solver_config_);
     solver.set_oop_range(oop_range);
     solver.set_ip_range(ip_range);
+    solver.set_oop_range_str(oop_range_str_);
+    solver.set_ip_range_str(ip_range_str_);
     solver.build();
     solver.solve();
 
@@ -546,6 +548,8 @@ void CLI::cmd_solve() {
     CFRSolver solver(game_params_, solver_config_);
     solver.set_oop_range(oop_range);
     solver.set_ip_range(ip_range);
+    solver.set_oop_range_str(oop_range_str_);
+    solver.set_ip_range_str(ip_range_str_);
     solver.build();
     solver.solve();
 

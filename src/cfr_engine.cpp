@@ -1359,6 +1359,146 @@ void CFRSolver::best_response_chance(
     }
 }
 
+void CFRSolver::evaluate_strategy_traverse(
+    const GameTreeNode* node,
+    int eval_player,
+    const std::vector<float>& oop_reach,
+    const std::vector<float>& ip_reach,
+    std::vector<float>& hand_values,
+    CardMask dead_cards) const
+{
+    if (!node) return;
+
+    if (node->is_terminal() || node->type == NodeType::FOLD) {
+        if (node->type == NodeType::FOLD) {
+            compute_fold_payoffs(eval_player, node->player, node->pot,
+                                 oop_reach, ip_reach, hand_values, dead_cards);
+        } else {
+            compute_showdown_payoffs(eval_player, node->pot,
+                                     oop_reach, ip_reach, hand_values, dead_cards);
+        }
+        return;
+    }
+
+    if (node->is_chance()) {
+        evaluate_strategy_chance(node, eval_player, oop_reach, ip_reach,
+                                 hand_values, dead_cards);
+        return;
+    }
+
+    int acting_player = node->player;
+    const auto& acting_range = get_range(acting_player);
+    const auto& eval_range = get_range(eval_player);
+    int num_actions = node->num_actions();
+    int num_acting_hands = static_cast<int>(acting_range.size());
+    int num_eval_hands = static_cast<int>(eval_range.size());
+    bool acting_is_oop = (acting_player == 0);
+
+    std::vector<float> strategies(num_acting_hands * num_actions);
+    for (int h = 0; h < num_acting_hands; ++h) {
+        int ci = get_canonical_index(acting_player, h);
+        storage_.get_average_strategy(node->node_index, ci, num_actions,
+                                       &strategies[h * num_actions]);
+    }
+
+    if (acting_player == eval_player) {
+        std::vector<std::vector<float>> action_values(num_actions,
+            std::vector<float>(num_eval_hands, 0.0f));
+
+        for (int a = 0; a < num_actions; ++a) {
+            evaluate_strategy_traverse(node->children[a].get(), eval_player,
+                                   oop_reach, ip_reach, action_values[a],
+                                   dead_cards);
+        }
+
+        hand_values.assign(num_eval_hands, 0.0f);
+        for (int a = 0; a < num_actions; ++a) {
+            for (int h = 0; h < num_eval_hands; ++h) {
+                hand_values[h] += action_values[a][h] * strategies[h * num_actions + a];
+            }
+        }
+
+    } else {
+        std::vector<float> modified_reach(num_acting_hands);
+        std::vector<std::vector<float>> action_values(num_actions,
+            std::vector<float>(num_eval_hands, 0.0f));
+
+        const auto& act_reach = acting_is_oop ? oop_reach : ip_reach;
+
+        for (int a = 0; a < num_actions; ++a) {
+            for (int h = 0; h < num_acting_hands; ++h) {
+                modified_reach[h] = act_reach[h] * strategies[h * num_actions + a];
+            }
+
+            if (acting_is_oop) {
+                evaluate_strategy_traverse(node->children[a].get(), eval_player,
+                                       modified_reach, ip_reach, action_values[a],
+                                       dead_cards);
+            } else {
+                evaluate_strategy_traverse(node->children[a].get(), eval_player,
+                                       oop_reach, modified_reach, action_values[a],
+                                       dead_cards);
+            }
+        }
+
+        hand_values.assign(num_eval_hands, 0.0f);
+        for (int a = 0; a < num_actions; ++a) {
+            for (int h = 0; h < num_eval_hands; ++h) {
+                hand_values[h] += action_values[a][h];
+            }
+        }
+    }
+}
+
+void CFRSolver::evaluate_strategy_chance(
+    const GameTreeNode* node,
+    int eval_player,
+    const std::vector<float>& oop_reach,
+    const std::vector<float>& ip_reach,
+    std::vector<float>& hand_values,
+    CardMask dead_cards) const
+{
+    const auto& eval_range = get_range(eval_player);
+    int num_eval_hands = static_cast<int>(eval_range.size());
+    int num_oop = static_cast<int>(oop_range_.size());
+    int num_ip = static_cast<int>(ip_range_.size());
+    hand_values.assign(num_eval_hands, 0.0f);
+
+    std::vector<float> new_oop_reach(num_oop);
+    std::vector<float> new_ip_reach(num_ip);
+    std::vector<float> card_values(num_eval_hands);
+    int num_deals = 0;
+
+    for (int card = 0; card < NUM_CARDS; ++card) {
+        if (mask_has_card(dead_cards, card)) continue;
+
+        CardMask new_dead = mask_add_card(dead_cards, card);
+
+        for (int h = 0; h < num_oop; ++h) {
+            new_oop_reach[h] = mask_has_card(oop_range_[h].mask(), card) ? 0.0f : oop_reach[h];
+        }
+        for (int h = 0; h < num_ip; ++h) {
+            new_ip_reach[h] = mask_has_card(ip_range_[h].mask(), card) ? 0.0f : ip_reach[h];
+        }
+
+        std::fill(card_values.begin(), card_values.end(), 0.0f);
+        evaluate_strategy_traverse(node->children[0].get(), eval_player,
+                               new_oop_reach, new_ip_reach, card_values, new_dead);
+
+        for (int h = 0; h < num_eval_hands; ++h) {
+            hand_values[h] += card_values[h];
+        }
+        num_deals++;
+    }
+
+    if (num_deals > 0) {
+        float inv = 1.0f / num_deals;
+        for (int h = 0; h < num_eval_hands; ++h) {
+            hand_values[h] *= inv;
+        }
+    }
+}
+
 double CFRSolver::compute_exploitability() const {
     int num_oop = static_cast<int>(oop_range_.size());
     int num_ip = static_cast<int>(ip_range_.size());
@@ -1423,13 +1563,18 @@ std::string CFRSolver::export_json() const {
     }
     json << "\",\n";
 
+    json << "  \"oop_range\": \"" << oop_range_str_ << "\",\n";
+    json << "  \"ip_range\": \"" << ip_range_str_ << "\",\n";
+
     json << "  \"root_strategy\": {\n";
     
     const auto& root = root_;
     if (root && root->is_player()) {
         int player = root->player;
         const auto& range = get_range(player);
+        const auto& opp_range = get_range(1 - player);
         int num_actions = root->num_actions();
+        int num_hands = static_cast<int>(range.size());
         
         json << "    \"player\": " << player << ",\n";
         json << "    \"actions\": [";
@@ -1439,22 +1584,59 @@ std::string CFRSolver::export_json() const {
         }
         json << "],\n";
         json << "    \"hands\": {\n";
+
+        std::vector<float> oop_reach(oop_range_.size());
+        for (size_t i = 0; i < oop_range_.size(); ++i) oop_reach[i] = oop_range_[i].weight;
+        std::vector<float> ip_reach(ip_range_.size());
+        for (size_t i = 0; i < ip_range_.size(); ++i) ip_reach[i] = ip_range_[i].weight;
+
+        std::vector<std::vector<float>> action_evs(num_actions, std::vector<float>(num_hands, 0.0f));
+        for (int a = 0; a < num_actions; ++a) {
+            evaluate_strategy_traverse(root->children[a].get(), player, 
+                                       oop_reach, ip_reach, action_evs[a], game_params_.board.mask);
+        }
         
         std::vector<float> strategy(num_actions);
-        for (int h = 0; h < static_cast<int>(range.size()); ++h) {
+        for (int h = 0; h < num_hands; ++h) {
             const Hand& hand = range[h];
             if (hand.conflicts_with(game_params_.board.mask)) continue;
             
             int ci = get_canonical_index(player, h);
             storage_.get_average_strategy(root->node_index, ci, num_actions, strategy.data());
             
+            // Calculate normalization factor for EV
+            float opp_weight_sum = 0.0f;
+            for (size_t o = 0; o < opp_range.size(); ++o) {
+                if (opp_range[o].conflicts_with(game_params_.board.mask)) continue;
+                if (hand.mask() & opp_range[o].mask()) continue;
+                opp_weight_sum += opp_range[o].weight;
+            }
+            float inv_wt = opp_weight_sum > 0.0f ? (1.0f / opp_weight_sum) : 1.0f;
+
+            float node_ev = 0.0f;
+            for (int a = 0; a < num_actions; ++a) {
+                node_ev += action_evs[a][h] * strategy[a] * inv_wt;
+            }
+
             if (h > 0) json << ",\n";
-            json << "      \"" << hand.to_string() << "\": [";
+            json << "      \"" << hand.to_string() << "\": {\n";
+            
+            json << "        \"strategy\": [";
             for (int a = 0; a < num_actions; ++a) {
                 if (a > 0) json << ", ";
                 json << std::fixed << std::setprecision(4) << strategy[a];
             }
-            json << "]";
+            json << "],\n";
+            
+            json << "        \"ev\": " << std::fixed << std::setprecision(4) << node_ev << ",\n";
+            json << "        \"ev_action\": [";
+            for (int a = 0; a < num_actions; ++a) {
+                if (a > 0) json << ", ";
+                json << std::fixed << std::setprecision(4) << (action_evs[a][h] * inv_wt);
+            }
+            json << "]\n";
+            
+            json << "      }";
         }
         json << "\n    }\n";
     }
