@@ -32,6 +32,7 @@ Options:
   --ip-range <range>    IP player range (e.g., "TT+,ATs+,KQs")
   --iterations <n>      Number of CFR iterations (default: 200)
   --threads <n>         Number of threads (default: 1)
+  --mccfr               Enable Monte Carlo CFR (External Sampling) for fast large-tree solving
   --bet-sizes <sizes>   Bet sizes as % of pot for all players/streets (e.g., "33,67,100")
   --raise-sizes <sizes> Raise sizes as % of pot for all players/streets (e.g., "50,100")
   --allin-threshold <f> All-in threshold (default: 0.67). Set 0 to disable.
@@ -80,6 +81,8 @@ bool CLI::parse_args(int argc, char* argv[]) {
             solver_config_.num_iterations = std::stoi(argv[++i]);
         } else if (arg == "--threads" && i + 1 < argc) {
             solver_config_.num_threads = std::stoi(argv[++i]);
+        } else if (arg == "--mccfr") {
+            solver_config_.use_mccfr = true;
         } else if (arg == "--bet-sizes" && i + 1 < argc) {
             auto sizes = parse_bet_sizes(argv[++i]);
             // Set for both OOP and IP on all streets

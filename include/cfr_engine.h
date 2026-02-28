@@ -12,6 +12,7 @@
 #include <queue>
 #include <unordered_map>
 #include <algorithm>
+#include <random>
 
 namespace poker {
 
@@ -161,6 +162,7 @@ public:
         int num_threads = 1;
         bool use_dcfr = true;
         bool use_isomorphism = true;   // enable suit isomorphism
+        bool use_mccfr = false;        // enable Monte Carlo CFR (External Sampling)
         bool print_progress = true;
         int print_interval = 10;
         

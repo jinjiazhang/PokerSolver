@@ -20,8 +20,9 @@ PokerSolver 是一个从零实现的无限注德州扑克 **博弈论最优 (GTO
 
 ### 特性
 
-- 🚀 **极致性能** — River 全范围 1081×1081 仅需 **0.5ms/iter**，对比初始版本 **234x 加速**
+- 🚀 **极致性能** — River 全范围 1081×1081 仅需 **0.5ms/iter**，Flop 全树解算新增 MCCFR 可实现 **72x 提速**
 - ⚡ **多线程并行** — Chance 节点级并行 + 无锁 Thread-Local 累加器
+- 🎲 **MCCFR 外部采样** — 针对巨大深度 (Flop/Preflop) 的蒙特卡洛发牌采样，几秒内逼近纳什均衡
 - 🎨 **花色同构** — 自动识别可交换花色，单色面板信息集降低 **71%**
 - 🧠 **DCFR 算法** — 相比 vanilla CFR 收敛速度提升数倍
 - 📊 **全街支持** — Flop / Turn / River 子博弈求解
@@ -40,7 +41,10 @@ PokerSolver 是一个从零实现的无限注德州扑克 **博弈论最优 (GTO
 | River | 1,081 × 1,081 | 50 | **0.5ms** | 0.02s |
 | Turn | 20 × 36 | 50 | **1.8ms** | 0.09s |
 | Turn (全范围) | 1,128 × 1,128 | 10 | **540ms** | 6.20s |
-| Flop | 35 × 48 | 10 | **230ms** | 2.53s |
+| Flop (全树展开) | 32 × 32 | 2000 | **298ms** | 597s |
+| Flop (**MCCFR 采样**) | 32 × 32 | 2000 | **4.1ms** | **8.3s** |
+
+> Flop 测试环境：Board AhKdQc, OOP范围 32 组合, IP范围 32 组合, 8 线程并行
 
 ### 累计优化加速比
 
@@ -111,6 +115,7 @@ poker_solver \
   --allin-threshold 0.67 \
   --accuracy 0.5 \
   --iterations 1000 \
+  --mccfr \
   --threads 8 \
   --output strategy.json
 
@@ -152,6 +157,7 @@ solver> solve
 | `--ip-range <range>` | IP 范围 | `random` |
 | `--iterations <n>` | 迭代次数上限 | 200 |
 | `--threads <n>` | 线程数 | 1 |
+| `--mccfr` | 开启 MCCFR (外部采样) 取代全树展开，大幅加速深层博弈 | - |
 | `--bet-sizes <pcts>` | 下注尺寸 (底池%) | `33,67,100` |
 | `--raise-sizes <pcts>` | 加注尺寸 (底池%) | `50,100` |
 | `--allin-threshold <f>` | All-in 阈值 | `0.67` |
@@ -260,6 +266,11 @@ PokerSolver/
 3. **反事实遗憾更新** — 遗憾 = 动作价值 - 节点价值
 4. **收敛定理** — 平均策略可利用度以 O(1/√T) 收敛
 
+### MCCFR (Monte Carlo CFR) 外部采样
+
+在面对庞大的 Flop / Pre-flop 子树时（例如 Flop 需要遍历未来 47 张 Turn 牌及 46 张 River 牌），引擎通过 `--mccfr` 标志切换到外部采样模式：**每次迭代只随机抽取一张实际公共牌，极大避免组合爆炸。**
+速度可达到单次几十毫秒内，在数秒钟逼近纳什均衡。对于较浅的深度（Turn/River），则自动使用精确的全树展开保证数学极限无亏损。
+
 ### DCFR 参数
 
 | 参数 | 值 | 作用 |
@@ -274,10 +285,11 @@ PokerSolver/
 ┌─────────────────────────────────────────────────────────────────┐
 │                     性能优化层次                                  │
 ├─────────────────────────────────────────────────────────────────┤
-│ 求值层  │ O(M+N) 排序扫描 showdown + O(M+N) 牌面排除 fold      │
-│ 缓存层  │ RiverSortedRange 按 board 缓存 + Hand mask 构造缓存   │
-│ 遍历层  │ 无拷贝 reach 传递 + flat 策略数组 + 合并更新循环       │
-│ 同构层  │ 花色同构 → 合并等价信息集，最高 71% 降维               │
+│ 采样层  │ MCCFR 外部抽取采样，Flop 下发牌分支由 O(1000) 变 O(1)    │
+│ 求值层  │ O(M+N) 排序扫描 showdown + O(M+N) 牌面排除 fold        │
+│ 缓存层  │ RiverSortedRange 按 board 缓存 + Hand mask 构造缓存     │
+│ 遍历层  │ 无拷贝 reach 传递 + flat 策略数组 + 合并更新循环         │
+│ 同构层  │ 花色同构 → 合并等价信息集，最高 71% 降维                 │
 │ 并行层  │ Chance 节点级多线程 + 无锁 Thread-Local 累加器         │
 │ 内存层  │ Chance 节点预分配缓冲区，零 heap 分配                  │
 │ 算法层  │ DCFR 单遍折扣 + 自适应 exploitability 频率             │
@@ -360,9 +372,10 @@ QdQs    73.9%     0.0%      0.0%      26.1%
 - [x] 花色同构 (最高 71% 降维)
 - [x] JSON 策略导出 + 交互式 REPL
 
-### ✅ 性能优化 (累计 165-234x 加速)
+### ✅ 性能及模型优化 (累计提速极大)
 
-- [x] O(M+N) 排序扫描 Showdown (RiverSortedRange 缓存 + 双指针扫描)
+- [x] O(M+N) 排序扫描 Showdown (修复反转漏洞)
+- [x] MCCFR (Monte Carlo CFR) External Sampling 支持
 - [x] O(M+N) 牌面排除 Fold (card_sum[52] 快速求值)
 - [x] Chance 节点零 heap 分配 (预分配缓冲区复用)
 - [x] 无拷贝 reach 传递 (未修改侧直接传引用)

@@ -299,6 +299,9 @@ void CFRSolver::solve() {
     if (isomorphism_enabled_) {
         std::cout << ", isomorphism";
     }
+    if (config_.use_mccfr) {
+        std::cout << ", mccfr";
+    }
     if (config_.target_exploitability > 0) {
         std::cout << ", target " << config_.target_exploitability << "%";
     }
@@ -536,12 +539,42 @@ void CFRSolver::cfr_traverse_chance(
     // Pre-allocate buffers once, reuse for each deal card
     std::vector<float> new_oop_reach(num_oop);
     std::vector<float> new_ip_reach(num_ip);
+    
+    std::vector<int> valid_cards;
+    valid_cards.reserve(52);
+    for (int card = 0; card < NUM_CARDS; ++card) {
+        if (!mask_has_card(dead_cards, card)) {
+            valid_cards.push_back(card);
+        }
+    }
+    
+    if (valid_cards.empty()) {
+        return;
+    }
+
+    if (config_.use_mccfr) {
+        thread_local std::mt19937 rng(std::random_device{}());
+        std::uniform_int_distribution<int> dist(0, valid_cards.size() - 1);
+        int card = valid_cards[dist(rng)];
+
+        CardMask new_dead = mask_add_card(dead_cards, card);
+        for (int h = 0; h < num_oop; ++h) {
+            new_oop_reach[h] = mask_has_card(oop_range_[h].mask(), card) ? 0.0f : oop_reach[h];
+        }
+        for (int h = 0; h < num_ip; ++h) {
+            new_ip_reach[h] = mask_has_card(ip_range_[h].mask(), card) ? 0.0f : ip_reach[h];
+        }
+
+        cfr_traverse(node->children[0].get(), traversing_player,
+                     new_oop_reach, new_ip_reach, hand_values,
+                     new_dead, iteration);
+        return;
+    }
+
     std::vector<float> card_values(num_trav_hands);
     int num_deals = 0;
     
-    for (int card = 0; card < NUM_CARDS; ++card) {
-        if (mask_has_card(dead_cards, card)) continue;
-
+    for (int card : valid_cards) {
         CardMask new_dead = mask_add_card(dead_cards, card);
         
         for (int h = 0; h < num_oop; ++h) {
@@ -755,6 +788,33 @@ void CFRSolver::cfr_traverse_chance_parallel(
 
     int num_deals = static_cast<int>(deal_cards.size());
     if (num_deals == 0) return;
+
+    if (config_.use_mccfr) {
+        thread_local std::mt19937 rng(std::random_device{}());
+        std::uniform_int_distribution<int> dist(0, deal_cards.size() - 1);
+        int card = deal_cards[dist(rng)];
+
+        CardMask new_dead = mask_add_card(dead_cards, card);
+        std::vector<float> new_oop_reach(num_oop);
+        std::vector<float> new_ip_reach(num_ip);
+        
+        for (int h = 0; h < num_oop; ++h) {
+            new_oop_reach[h] = mask_has_card(oop_range_[h].mask(), card) ? 0.0f : oop_reach[h];
+        }
+        for (int h = 0; h < num_ip; ++h) {
+            new_ip_reach[h] = mask_has_card(ip_range_[h].mask(), card) ? 0.0f : ip_reach[h];
+        }
+
+        ThreadLocalAccumulator& accum = thread_accumulators_[0]; // Safe since chance node parallelization is the only parallel spot, wait actually this is a nested call so we need accumulation array from current thread. Wait, cfr_traverse_chance_parallel is called from cfr_traverse_threaded which passes accum as an argument!
+        // But `cfr_traverse_chance_parallel` doesn't take `accum`, it takes `hand_values` and accesses `thread_accumulators_`
+        // So we can just use `thread_accumulators_[0]` if we don't spawn threads here. BUT we need to be careful if we are already in a thread!
+        // Actually, cfr_iteration_parallel doesn't spawn threads EXCEPT at the chance node!
+        // So here we are always in the main thread.
+        cfr_traverse_threaded(node->children[0].get(), traversing_player,
+                              new_oop_reach, new_ip_reach, hand_values,
+                              new_dead, iteration, thread_accumulators_[0]);
+        return;
+    }
 
     struct ThreadResult {
         std::vector<float> partial_values;
