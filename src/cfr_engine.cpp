@@ -931,23 +931,23 @@ void CFRSolver::compute_showdown_sorted(
 
     if (num_trav_sorted == 0 || num_opp_sorted == 0) return;
 
-    // Pass 1: compute winning payoffs (traverse from strongest to weakest)
+    // Pass 1: compute winning payoffs (traverse from weakest to strongest)
     // For each trav hand, sum up opp reach of hands that are WEAKER
     {
         float winsum = 0.0f;
         float card_winsum[52] = {};
 
-        int j = 0;
-        for (int i = 0; i < num_trav_sorted; ++i) {
+        int j = num_opp_sorted - 1;
+        for (int i = num_trav_sorted - 1; i >= 0; --i) {
             const auto& th = trav_hands[i];
             // Advance j to include all opp hands with rank < trav rank (weaker)
-            while (j < num_opp_sorted && opp_hands[j].rank > th.rank) {
+            while (j >= 0 && opp_hands[j].rank < th.rank) {
                 const auto& oh = opp_hands[j];
                 float r = opp_reach_vec[oh.hand_index];
                 winsum += r;
                 card_winsum[oh.card1] += r;
                 card_winsum[oh.card2] += r;
-                j++;
+                j--;
             }
             // winsum includes all opp hands strictly weaker than trav
             // Subtract card conflicts (opp hands that share a card with trav)
@@ -958,22 +958,22 @@ void CFRSolver::compute_showdown_sorted(
         }
     }
 
-    // Pass 2: compute losing payoffs (traverse from weakest to strongest)
+    // Pass 2: compute losing payoffs (traverse from strongest to weakest)
     {
         float losssum = 0.0f;
         float card_losssum[52] = {};
 
-        int j = num_opp_sorted - 1;
-        for (int i = num_trav_sorted - 1; i >= 0; --i) {
+        int j = 0;
+        for (int i = 0; i < num_trav_sorted; ++i) {
             const auto& th = trav_hands[i];
             // Advance j to include all opp hands with rank > trav rank (stronger)
-            while (j >= 0 && opp_hands[j].rank < th.rank) {
+            while (j < num_opp_sorted && opp_hands[j].rank > th.rank) {
                 const auto& oh = opp_hands[j];
                 float r = opp_reach_vec[oh.hand_index];
                 losssum += r;
                 card_losssum[oh.card1] += r;
                 card_losssum[oh.card2] += r;
-                j--;
+                j++;
             }
             // losssum includes all opp hands strictly stronger than trav
             hand_values[th.hand_index] -= (losssum
