@@ -166,9 +166,10 @@ IsomorphismMap build_isomorphism_map(const Board& board, const std::vector<Hand>
 // ============================================================================
 struct Hand {
     int cards[2];
+    float weight = 1.0f;
 
-    Hand() : cards{-1, -1} {}
-    Hand(int c0, int c1) {
+    Hand() : cards{-1, -1}, weight(1.0f) {}
+    Hand(int c0, int c1, float w = 1.0f) : weight(w) {
         // Always store in sorted order (lower first)
         if (c0 < c1) { cards[0] = c0; cards[1] = c1; }
         else          { cards[0] = c1; cards[1] = c0; }

@@ -364,8 +364,12 @@ void CFRSolver::cfr_iteration(int iteration) {
         int num_oop_hands = static_cast<int>(oop_range_.size());
         int num_ip_hands = static_cast<int>(ip_range_.size());
 
-        std::vector<float> oop_reach(num_oop_hands, 1.0f);
-        std::vector<float> ip_reach(num_ip_hands, 1.0f);
+        std::vector<float> oop_reach(num_oop_hands);
+        for (int i = 0; i < num_oop_hands; ++i) oop_reach[i] = oop_range_[i].weight;
+        
+        std::vector<float> ip_reach(num_ip_hands);
+        for (int i = 0; i < num_ip_hands; ++i) ip_reach[i] = ip_range_[i].weight;
+        
         std::vector<float> hand_values(num_trav_hands, 0.0f);
 
         cfr_traverse(root_.get(), traverser, oop_reach, ip_reach, 
@@ -586,8 +590,12 @@ void CFRSolver::cfr_iteration_parallel(int iteration) {
         int num_oop_hands = static_cast<int>(oop_range_.size());
         int num_ip_hands = static_cast<int>(ip_range_.size());
 
-        std::vector<float> oop_reach(num_oop_hands, 1.0f);
-        std::vector<float> ip_reach(num_ip_hands, 1.0f);
+        std::vector<float> oop_reach(num_oop_hands);
+        for (int i = 0; i < num_oop_hands; ++i) oop_reach[i] = oop_range_[i].weight;
+        
+        std::vector<float> ip_reach(num_ip_hands);
+        for (int i = 0; i < num_ip_hands; ++i) ip_reach[i] = ip_range_[i].weight;
+        
         std::vector<float> hand_values(num_trav_hands, 0.0f);
 
         for (auto& accum : thread_accumulators_) {
@@ -1246,8 +1254,12 @@ double CFRSolver::compute_exploitability() const {
         int num_trav = static_cast<int>(trav_range.size());
         int num_opp = static_cast<int>(opp_range.size());
 
-        std::vector<float> oop_reach(num_oop, 1.0f);
-        std::vector<float> ip_reach(num_ip, 1.0f);
+        std::vector<float> oop_reach(num_oop);
+        for (int i = 0; i < num_oop; ++i) oop_reach[i] = oop_range_[i].weight;
+        
+        std::vector<float> ip_reach(num_ip);
+        for (int i = 0; i < num_ip; ++i) ip_reach[i] = ip_range_[i].weight;
+        
         std::vector<float> hand_values(num_trav, 0.0f);
 
         best_response_traverse(root_.get(), br_player, oop_reach, ip_reach,

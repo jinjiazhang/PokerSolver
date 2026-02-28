@@ -207,7 +207,8 @@ std::vector<Hand> RangeParser::parse_single(const std::string& token, CardMask d
 }
 
 std::vector<Hand> RangeParser::parse(const std::string& range_str, CardMask dead_cards) {
-    std::vector<Hand> result;
+    std::vector<float> weights(NUM_COMBOS, 0.0f);
+    std::vector<bool> has_hand(NUM_COMBOS, false);
     
     // Split by comma
     std::istringstream iss(range_str);
@@ -215,23 +216,51 @@ std::vector<Hand> RangeParser::parse(const std::string& range_str, CardMask dead
     
     while (std::getline(iss, token, ',')) {
         // Trim whitespace
+        if (token.empty()) continue;
         token.erase(0, token.find_first_not_of(" \t"));
+        if (token.empty()) continue;
         token.erase(token.find_last_not_of(" \t") + 1);
         
+        float weight = 1.0f;
+        auto colon = token.rfind(':');
+        if (colon != std::string::npos) {
+            try {
+                weight = std::stof(token.substr(colon + 1));
+            } catch (...) {
+                weight = 1.0f;
+            }
+            token = token.substr(0, colon);
+            // Trim token again
+            if (!token.empty()) {
+                token.erase(0, token.find_first_not_of(" \t"));
+                if (!token.empty()) {
+                    token.erase(token.find_last_not_of(" \t") + 1);
+                }
+            }
+        }
+
         if (token.empty()) continue;
         
         auto hands = parse_single(token, dead_cards);
-        result.insert(result.end(), hands.begin(), hands.end());
+        for (const auto& h : hands) {
+            int idx = h.combo_index();
+            has_hand[idx] = true;
+            weights[idx] = weight; // later overrides earlier
+        }
     }
 
-    // Remove duplicates
-    std::sort(result.begin(), result.end(), [](const Hand& a, const Hand& b) {
-        if (a.cards[0] != b.cards[0]) return a.cards[0] < b.cards[0];
-        return a.cards[1] < b.cards[1];
-    });
-    result.erase(std::unique(result.begin(), result.end(), [](const Hand& a, const Hand& b) {
-        return a.cards[0] == b.cards[0] && a.cards[1] == b.cards[1];
-    }), result.end());
+    std::vector<Hand> result;
+    auto all_hands = generate_all_hands();
+    for (const auto& h : all_hands) {
+        int idx = h.combo_index();
+        if (has_hand[idx] && weights[idx] > 0.0f) {
+            if (!h.conflicts_with(dead_cards)) {
+                Hand hc = h;
+                hc.weight = weights[idx];
+                result.push_back(hc);
+            }
+        }
+    }
 
     return result;
 }
@@ -245,6 +274,9 @@ std::string range_to_string(const std::vector<Hand>& range) {
     for (size_t i = 0; i < range.size(); ++i) {
         if (i > 0) oss << ",";
         oss << range[i].to_string();
+        if (range[i].weight != 1.0f) {
+            oss << ":" << range[i].weight;
+        }
     }
     return oss.str();
 }
