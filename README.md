@@ -20,49 +20,43 @@ PokerSolver 是一个从零实现的无限注德州扑克 **博弈论最优 (GTO
 
 ### 特性
 
-- 🚀 **极致性能** — River 面 75×75 范围 1000 次迭代仅需 **< 1 秒**
-- ⚡ **多线程并行** — Chance 节点级并行 + 无锁 Thread-Local 累加器，8 线程 **5x** 加速
-- 🎨 **花色同构** — 自动识别可交换花色，单色面板信息集降低 **71%**，节省内存与计算
+- 🚀 **极致性能** — River 全范围 1081×1081 仅需 **0.5ms/iter**，对比初始版本 **234x 加速**
+- ⚡ **多线程并行** — Chance 节点级并行 + 无锁 Thread-Local 累加器
+- 🎨 **花色同构** — 自动识别可交换花色，单色面板信息集降低 **71%**
 - 🧠 **DCFR 算法** — 相比 vanilla CFR 收敛速度提升数倍
 - 📊 **全街支持** — Flop / Turn / River 子博弈求解
-- 🎯 **OOP/IP 独立下注树** — 每条街 × 每个位置可独立配置 bet/raise/donk 尺寸
-- 💰 **Donk Bet 支持** — 自动检测 donk bet 场景，使用独立下注尺寸
-- ⚖️ **带权重范围** — 支持 `AA:0.75` 语法为特定组合指定频率权重
-- 🎲 **All-in 阈值** — 当下注后剩余筹码不足底池指定比例时，自动合并为 all-in
-- 🎯 **收敛精度停止** — 达到目标可利用度后自动停止迭代，节省计算时间
-- 📝 **标准范围语法** — 支持 `AA`, `AKs`, `TT+`, `22-55`, `AhKh`, `random` 等
-- 📉 **可利用度计算** — Best Response 实时跟踪，迭代中每次输出收敛状态
-- 💾 **JSON 导出** — 策略结果可导出为 JSON 格式，便于二次开发
+- 🎯 **灵活下注树** — OOP/IP 独立配置 bet/raise/donk 尺寸，All-in 阈值自动合并
+- 📝 **标准范围语法** — 支持 `AA`, `AKs`, `TT+`, `22-55`, `AhKh`, `AA:0.75`, `random` 等
+- 📉 **实时收敛跟踪** — Best Response 可利用度实时输出，达标自动停止
+- 💾 **JSON 导出** — 策略可导出 JSON 格式
 - 🖥️ **双模式界面** — 命令行参数模式 + 交互式 REPL 模式
 
 ---
 
 ## ⚡ 性能基准
 
-### 单线程性能
+| 场景 | 范围大小 | 迭代次数 | 每次迭代 | 用时 |
+|------|----------|----------|----------|------|
+| River | 1,081 × 1,081 | 50 | **0.5ms** | 0.02s |
+| Turn | 20 × 36 | 50 | **1.8ms** | 0.09s |
+| Turn (全范围) | 1,128 × 1,128 | 10 | **540ms** | 6.20s |
+| Flop | 35 × 48 | 10 | **230ms** | 2.53s |
 
-| 场景 | 范围大小 | 迭代次数 | 用时 | 每次迭代 |
-|------|----------|----------|------|----------|
-| River (5张公共牌) | 1,081 × 1,081 | 50 | **0.08s** | 1.6ms |
-| Turn (4张公共牌) | 20 × 36 | 50 | **0.27s** | 5.3ms |
-| Turn (全范围) | 1,128 × 1,128 | 10 | **7.22s** | 632ms |
-| Flop (3张公共牌) | 35 × 48 | 5 | **3.29s** | 569ms |
+### 累计优化加速比
 
-### Turn 性能优化对比 (20×36 范围, 50 iterations)
+| 场景 | 初始版本 | 当前版本 | 加速比 |
+|------|---------|---------|--------|
+| Turn 20×36 | 297 ms/iter | 1.8 ms/iter | **165×** |
+| River 1081×1081 | 117 ms/iter | 0.5 ms/iter | **234×** |
+| Flop 35×48 | 不可用 | 230 ms/iter | ∞ |
 
-| 版本 | 每次迭代 | 加速比 |
-|------|----------|--------|
-| 优化前 (O(M×N) showdown + fold) | 297ms | 1.0× |
-| **优化后 (O(M+N) sorted sweep)** | **5.3ms** | **56×** |
+### 花色同构降维
 
-### 花色同构降维效果 (全范围 random vs random)
-
-| 牌面类型 | 公共牌示例 | 原始手牌 | 规范组 | 降幅 |
-|----------|-----------|----------|--------|------|
-| 单色 Flop (c/d/s 可互换) | `AhKhQh` | 1,176 | 344 | **71%** |
-| 四同花 River (d/s 可互换) | `AhKhQhJh2c` | 1,081 | 652 | **40%** |
-| 两色 Flop (d/s 可互换) | `AhKh5c` | 1,176 | 721 | **39%** |
-| 全彩虹 River (无可交换花色) | `AhKdQcTs5h` | 1,081 | 1,081 | 0% |
+| 牌面类型 | 示例 | 原始 → 规范组 | 降幅 |
+|----------|------|---------------|------|
+| 单色 Flop | `AhKhQh` | 1,176 → 344 | **71%** |
+| 四同花 River | `AhKhQhJh2c` | 1,081 → 652 | **40%** |
+| 两色 Flop | `AhKh5c` | 1,176 → 721 | **39%** |
 
 > 测试环境：Windows, MSVC 19.44, Release (/O2 /arch:AVX2)
 
@@ -101,13 +95,12 @@ cmake --build build -j$(nproc)
 # 基础用法：River 面解算
 poker_solver \
   --board AhKd5cTs2s \
-  --pot 100 \
-  --stack 200 \
+  --pot 100 --stack 200 \
   --oop-range "AA,KK,QQ,JJ,AKs,AKo" \
   --ip-range "TT+,AQs+,KQs" \
   --iterations 500
 
-# 多线程 + 自定义下注尺寸 + All-in 阈值 + 收敛精度停止
+# 完整示例：多线程 + 自定义下注 + 收敛停止
 poker_solver \
   --board AhKdQcTs \
   --pot 100 --stack 200 \
@@ -135,67 +128,15 @@ poker_solver \
 ```
 $ poker_solver --interactive
 
-╔══════════════════════════════════════════════════════════════╗
-║           PokerSolver - Interactive Mode                     ║
-╚══════════════════════════════════════════════════════════════╝
-Type 'help' for available commands.
-
 solver> board AhKd5cTs2s
-Board set: AhKd5cTs2s
-
 solver> pot 100
-Pot set to: 100
-
 solver> stack 200
-Stack set to: 200
-
 solver> oop_range AA,KK,QQ,AKs,AKo
-OOP range: 28 combos
-
 solver> ip_range TT+,AQs+,KQs
-IP range: 22 combos
-
 solver> set_bet_sizes oop,flop,bet,33,67
-oop flop bet sizes set to: 33% 67%
-
-solver> set_bet_sizes ip,flop,bet,50,100
-ip flop bet sizes set to: 50% 100%
-
 solver> set_bet_sizes oop,turn,donk,50
-oop turn donk sizes set to: 50%
-
-solver> allin_threshold 0.67
-All-in threshold set to: 0.67
-
 solver> accuracy 0.5
-Target exploitability set to: 0.5%
-
-solver> iterations 500
-Iterations set to: 500
-
 solver> solve
-Building game tree...
-  Player nodes: 28
-  Total nodes:  81
-
-Starting DCFR solver (500 iterations, isomorphism, target 0.5%)...
-============================================================
-  Iter    1 | 0.1 ms | avg 0.1 ms | ETA 0s | exploit 131.189%
-  Iter   10 | 0.1 ms | avg 0.1 ms | ETA 0s | exploit 5.312%
-  ...
-  Iter  200 | 0.0 ms | avg 0.0 ms | ETA 0s | exploit 0.312%
-  >>> Converged! Exploitability 0.312% < target 0.500%
-============================================================
-Solving complete in 0.02 seconds (200 iterations) [converged]
-
-=== Root Strategy (OOP) ===
-Actions: CHECK | BET 33 | BET 67 | ALLIN
-
-Hand    CHECK     BET 33    BET 67    ALLIN
-----------------------------------------------
-KcKh    0.0%      0.0%      0.0%      100.0%
-AcAd    0.0%      0.0%      0.0%      100.0%
-...
 ```
 
 ---
@@ -207,16 +148,16 @@ AcAd    0.0%      0.0%      0.0%      100.0%
 | `--board <cards>` | 公共牌面 (3~5张) | *必填* |
 | `--pot <amount>` | 初始底池大小 | 10 |
 | `--stack <amount>` | 有效筹码深度 | 100 |
-| `--oop-range <range>` | OOP (位置劣势方) 范围 | `random` |
-| `--ip-range <range>` | IP (位置优势方) 范围 | `random` |
-| `--iterations <n>` | CFR 迭代次数上限 | 200 |
+| `--oop-range <range>` | OOP 范围 | `random` |
+| `--ip-range <range>` | IP 范围 | `random` |
+| `--iterations <n>` | 迭代次数上限 | 200 |
 | `--threads <n>` | 线程数 | 1 |
-| `--bet-sizes <pcts>` | 全局下注尺寸 (底池百分比) | `33,67,100` |
-| `--raise-sizes <pcts>` | 全局加注尺寸 (底池百分比) | `50,100` |
-| `--allin-threshold <f>` | All-in 阈值 (0=禁用) | `0.67` |
-| `--accuracy <pct>` | 目标可利用度 % (0=禁用) | `0.5` |
-| `--output <file>` | 输出 JSON 文件路径 | *stdout* |
-| `--interactive` | 启动交互式模式 | - |
+| `--bet-sizes <pcts>` | 下注尺寸 (底池%) | `33,67,100` |
+| `--raise-sizes <pcts>` | 加注尺寸 (底池%) | `50,100` |
+| `--allin-threshold <f>` | All-in 阈值 | `0.67` |
+| `--accuracy <pct>` | 目标可利用度 % | `0.5` |
+| `--output <file>` | 输出 JSON 路径 | *stdout* |
+| `--interactive` | 交互式模式 | - |
 
 ---
 
@@ -224,30 +165,18 @@ AcAd    0.0%      0.0%      0.0%      100.0%
 
 | 语法 | 含义 | 组合数 |
 |------|------|--------|
-| `AA` | 口袋 A (所有花色组合) | 6 |
+| `AA` | 口袋 A | 6 |
 | `AKs` | AK 同花 | 4 |
 | `AKo` | AK 不同花 | 12 |
-| `AK` | AK 全部组合 | 16 |
-| `TT+` | TT 及以上对子 (TT, JJ, QQ, KK, AA) | 30 |
-| `ATs+` | AT同花及以上 (ATs, AJs, AQs, AKs) | 16 |
-| `22-55` | 对子范围 22 到 55 | 24 |
+| `AK` | AK 全部 | 16 |
+| `TT+` | TT 及以上对子 | 30 |
+| `ATs+` | AT同花及以上 | 16 |
+| `22-55` | 对子范围 | 24 |
 | `AhKh` | 指定具体组合 | 1 |
-| `random` | 全部可能手牌 | C(47,2) |
+| `AA:0.75` | 带权重 (75%频率) | 6 |
+| `random` | 全部手牌 | C(47,2) |
 
-### 带权重范围
-
-在范围语法后添加 `:权重` 可指定该组合的频率权重（0~1）：
-
-```
-AA:0.75,KK,QQ:0.5,AKs:0.25
-```
-
-- `AA:0.75` — AA 以 75% 的频率出现在范围中
-- `KK` — KK 以 100% 的频率出现（默认）
-- `QQ:0.5` — QQ 以 50% 的频率出现
-- 后出现的权重会覆盖先前的设置
-
-支持逗号分隔组合多种语法：`AA,KK,QQ,AKs,AQs+,JTs`
+支持逗号分隔：`AA:0.75,KK,QQ:0.5,AKs,AQs+,JTs`
 
 ---
 
@@ -255,80 +184,44 @@ AA:0.75,KK,QQ:0.5,AKs:0.25
 
 ### OOP/IP 独立下注配置
 
-每条街的 bet/raise 尺寸可以为 OOP 和 IP 分别配置。在交互式模式中使用统一命令：
-
 ```
 set_bet_sizes <player>,<street>,<type>,<sizes>
 ```
 
-| 参数 | 可选值 | 说明 |
-|------|--------|------|
-| `player` | `oop`, `ip` | 玩家位置 |
-| `street` | `flop`, `turn`, `river` | 街 |
-| `type` | `bet`, `raise`, `donk` | 下注类型 |
-| `sizes` | 逗号分隔数字 | 底池百分比 |
-
-**示例：**
+| 参数 | 可选值 |
+|------|--------|
+| `player` | `oop`, `ip` |
+| `street` | `flop`, `turn`, `river` |
+| `type` | `bet`, `raise`, `donk` |
 
 ```bash
-# OOP 在 flop 使用 33%, 67% 下注
-set_bet_sizes oop,flop,bet,33,67
-
-# IP 在 flop 使用 50%, 100% 下注
-set_bet_sizes ip,flop,bet,50,100
-
-# OOP 在 turn 的 donk bet 使用 50%
-set_bet_sizes oop,turn,donk,50
-
-# IP 在 river 的加注尺寸为 60%, 100%
-set_bet_sizes ip,river,raise,60,100
+set_bet_sizes oop,flop,bet,33,67      # OOP flop 下注 33%, 67%
+set_bet_sizes ip,flop,bet,50,100      # IP flop 下注 50%, 100%
+set_bet_sizes oop,turn,donk,50        # OOP turn donk 50%
+set_bet_sizes ip,river,raise,60,100   # IP river 加注 60%, 100%
 ```
 
-### Donk Bet（反主动下注）
+### Donk Bet
 
-**Donk bet** 是指位置不利的玩家 (OOP) 在新一条街对上一条街的攻击方 (IP) 抢先开注。Solver 会自动检测 donk 场景：
-
-- 当 **OOP 跟注 IP 的下注/加注**后进入新一条街 → OOP 开注使用 `donk_sizes`
-- 当 **IP 跟注 OOP 的下注/加注**后或双方 check → OOP 开注使用常规 `bet_sizes`
-
-如果未配置 `donk_sizes`，自动退回使用 `bet_sizes`。
+当 OOP 跟注 IP 的下注/加注后进入新一条街，OOP 开注使用 `donk_sizes`。未配置时自动退回使用 `bet_sizes`。
 
 ### All-in 阈值
 
-当一个下注/加注会使玩家剩余筹码低于 `阈值 × 下注后底池` 时，该下注自动被合并为 all-in，避免在博弈树中产生冗余的小筹码分支。
+下注后剩余筹码低于 `阈值 × 新底池` 时自动合并为 all-in：
 
 ```bash
-# 设置阈值为 0.67 (默认)
---allin-threshold 0.67
-
-# 禁用阈值
---allin-threshold 0
+--allin-threshold 0.67    # 默认
+--allin-threshold 0       # 禁用
 ```
-
-**效果示例：** pot=100, stack=200, bet=100(100%pot) → 剩余100, 新底池200, 100 < 0.67×200=134 → 自动合并为 all-in
 
 ### 收敛精度停止
 
-当可利用度降到目标百分比以下时，solver 自动停止迭代：
+可利用度降到目标以下时自动停止：
 
 ```bash
-# 目标精度 0.5% (默认)
---accuracy 0.5
-
-# 目标精度 0.1% (更精确但需要更多迭代)
---accuracy 0.1
-
-# 禁用 (纯按迭代次数)
---accuracy 0
-```
-
-输出中可以看到收敛提示：
-
-```
-  Iter  200 | 0.0 ms | avg 0.0 ms | ETA 0s | exploit 0.312%
-  >>> Converged! Exploitability 0.312% < target 0.500%
-============================================================
-Solving complete in 0.02 seconds (200 iterations) [converged]
+--accuracy 0.5    # 默认，0.5% pot
+--accuracy 0.1    # 更精确
+--accuracy 0      # 禁用
 ```
 
 ---
@@ -337,84 +230,65 @@ Solving complete in 0.02 seconds (200 iterations) [converged]
 
 ```
 PokerSolver/
-├── CMakeLists.txt              # CMake 构建配置
-├── README.md                   # 项目说明
-├── include/                    # 头文件
-│   ├── cards.h                 # 牌面表示、位掩码、花色同构映射
-│   ├── hand_eval.h             # 手牌评估器接口
-│   ├── game_tree.h             # 博弈树结构与构建 (OOP/IP 独立配置 + donk)
-│   ├── cfr_engine.h            # DCFR 求解引擎 (收敛停止 + 权重范围)
-│   ├── range_parser.h          # 范围解析器 (带权重支持)
-│   └── cli.h                   # 命令行界面
-└── src/                        # 源文件
-    ├── main.cpp                # 入口
-    ├── cards.cpp               # 牌面工具 + 花色同构规范化
-    ├── hand_eval.cpp           # 素数积哈希手牌评估
-    ├── game_tree.cpp           # 博弈树构建 (bet/raise/donk/fold/allin + 阈值)
-    ├── cfr_engine.cpp          # DCFR 核心 + 多线程并行 + 花色同构 + matchup 缓存
-    ├── range_parser.cpp        # 范围语法解析 (带权重)
-    └── cli.cpp                 # CLI 实现 (参数解析 + REPL + 分玩家配置)
+├── CMakeLists.txt
+├── README.md
+├── include/
+│   ├── cards.h            # 牌面表示、位掩码、花色同构
+│   ├── hand_eval.h        # 手牌评估器 (素数积哈希)
+│   ├── game_tree.h        # 博弈树 (OOP/IP 配置 + donk)
+│   ├── cfr_engine.h       # DCFR 引擎 (O(M+N) 求值 + 并行)
+│   ├── range_parser.h     # 范围解析 (带权重)
+│   └── cli.h              # 命令行界面
+└── src/
+    ├── main.cpp
+    ├── cards.cpp           # 花色同构规范化
+    ├── hand_eval.cpp       # 查表评估
+    ├── game_tree.cpp       # 博弈树构建
+    ├── cfr_engine.cpp      # DCFR 核心 + 并行 + 缓存
+    ├── range_parser.cpp    # 范围语法解析
+    └── cli.cpp             # CLI 实现
 ```
 
 ---
 
 ## 🧠 算法原理
 
-### Counterfactual Regret Minimization (CFR)
+### CFR (Counterfactual Regret Minimization)
 
-CFR 是求解大规模不完美信息博弈的主流算法，其核心思想是：
+1. **遍历博弈树**，对每个信息集计算策略
+2. **Regret Matching** — 策略与正遗憾值成比例
+3. **反事实遗憾更新** — 遗憾 = 动作价值 - 节点价值
+4. **收敛定理** — 平均策略可利用度以 O(1/√T) 收敛
 
-1. **遍历博弈树**，对每个信息集 (information set) 计算策略
-2. **Regret Matching** — 策略与正遗憾值成比例，无正遗憾时使用均匀策略
-3. **反事实遗憾更新** — 每个动作的遗憾 = 该动作价值 - 当前节点价值
-4. **收敛定理** — 经过 T 次迭代，平均策略的可利用度 (exploitability) 以 O(1/√T) 速率趋近于零
-
-### Discounted CFR (DCFR)
-
-本项目使用 DCFR 变体，通过非均匀加权历史迭代来加速收敛：
+### DCFR 参数
 
 | 参数 | 值 | 作用 |
 |------|-----|------|
 | α (正遗憾折扣) | 1.5 | 正遗憾乘以 `t^α / (t^α + 1)` |
-| β (负遗憾折扣) | 0.0 | 负遗憾清零 (完全遗忘) |
+| β (负遗憾折扣) | 0.0 | 负遗憾清零 |
 | γ (策略和折扣) | 2.0 | 策略和乘以 `(t/(t+1))^γ` |
 
-这使得近期迭代的策略权重更大，早期不成熟的策略影响被快速淡化。
-
-### 性能优化要点
+### 性能优化架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     性能优化层次                                  │
 ├─────────────────────────────────────────────────────────────────┤
 │ 求值层  │ O(M+N) 排序扫描 showdown + O(M+N) 牌面排除 fold      │
-│ 缓存层  │ RiverSortedRange 按 board 缓存，同 board 只排序一次    │
-│ 同构层  │ 花色同构 → 合并等价信息集，降维最高 71%                 │
-│ 并行层  │ Chance 节点级多线程 + 无锁 Thread-Local 累加器          │
-│ 内存层  │ Chance 节点预分配缓冲区，零 heap 分配                   │
-│ 算法层  │ DCFR 折扣 → 更少迭代即可收敛                           │
-│ 评估层  │ 素数积哈希 + flush/straight 查表 → O(1) 手牌评估        │
+│ 缓存层  │ RiverSortedRange 按 board 缓存 + Hand mask 构造缓存   │
+│ 遍历层  │ 无拷贝 reach 传递 + flat 策略数组 + 合并更新循环       │
+│ 同构层  │ 花色同构 → 合并等价信息集，最高 71% 降维               │
+│ 并行层  │ Chance 节点级多线程 + 无锁 Thread-Local 累加器         │
+│ 内存层  │ Chance 节点预分配缓冲区，零 heap 分配                  │
+│ 算法层  │ DCFR 单遍折扣 + 自适应 exploitability 频率             │
+│ 评估层  │ 素数积哈希 + flush/straight 查表 → O(1) 手牌评估       │
 │ 存储层  │ flat array 布局 → CPU cache 友好                       │
-│ 编译层  │ AVX2 + LTO + /O2 → 极致机器码优化                      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 📤 输出格式
-
-### 迭代进度输出
-
-```
-Starting DCFR solver (500 iterations, isomorphism, target 0.5%)...
-============================================================
-  Iter    1 | 0.1 ms | avg 0.1 ms | ETA 0s | exploit 131.189%
-  Iter   10 | 0.1 ms | avg 0.1 ms | ETA 0s | exploit 5.312%
-  Iter   20 | 0.0 ms | avg 0.0 ms | ETA 0s | exploit -3.142%
-  >>> Converged! Exploitability 3.142% < target 5.000%
-============================================================
-Solving complete in 0.00 seconds (20 iterations) [converged]
-```
 
 ### 策略摘要
 
@@ -437,15 +311,13 @@ QdQs    73.9%     0.0%      0.0%      26.1%
   "solver": "PokerSolver DCFR",
   "iterations": 200,
   "pot": 100,
-  "stack": 200,
   "board": "AhKd5cTs2s",
   "root_strategy": {
     "player": 0,
     "actions": ["CHECK", "BET 33", "BET 67", "ALLIN"],
     "hands": {
       "KcKh": [0.0000, 0.0000, 0.0000, 1.0000],
-      "AcAd": [0.0000, 0.0000, 0.0000, 1.0000],
-      "QdQs": [0.7390, 0.0000, 0.0000, 0.2610]
+      "AcAd": [0.0000, 0.0000, 0.0000, 1.0000]
     }
   }
 }
@@ -458,51 +330,51 @@ QdQs    73.9%     0.0%      0.0%      26.1%
 | 命令 | 说明 | 示例 |
 |------|------|------|
 | `board <cards>` | 设置公共牌 | `board AhKdQc` |
-| `pot <amount>` | 设置底池 | `pot 100` |
-| `stack <amount>` | 设置有效筹码 | `stack 200` |
-| `oop_range <range>` | 设置 OOP 范围 | `oop_range AA,KK,AKs` |
-| `ip_range <range>` | 设置 IP 范围 | `ip_range TT+,AQs+` |
-| **`set_bet_sizes <p>,<s>,<t>,<sizes>`** | **分玩家下注配置** | **`set_bet_sizes oop,flop,bet,33,67`** |
-| `flop_bet_sizes <pcts>` | Flop 下注尺寸 (双方) | `flop_bet_sizes 33,67,100` |
-| `turn_bet_sizes <pcts>` | Turn 下注尺寸 (双方) | `turn_bet_sizes 50,100` |
-| `river_bet_sizes <pcts>` | River 下注尺寸 (双方) | `river_bet_sizes 33,67` |
-| `flop_raise_sizes <pcts>` | Flop 加注尺寸 (双方) | `flop_raise_sizes 50,100` |
-| `turn_raise_sizes <pcts>` | Turn 加注尺寸 (双方) | `turn_raise_sizes 100` |
-| `river_raise_sizes <pcts>` | River 加注尺寸 (双方) | `river_raise_sizes 50,100` |
+| `pot <n>` | 设置底池 | `pot 100` |
+| `stack <n>` | 设置筹码 | `stack 200` |
+| `oop_range <r>` | OOP 范围 | `oop_range AA,KK,AKs` |
+| `ip_range <r>` | IP 范围 | `ip_range TT+,AQs+` |
+| `set_bet_sizes <...>` | 分玩家下注配置 | `set_bet_sizes oop,flop,bet,33,67` |
 | `allin_threshold <f>` | All-in 阈值 | `allin_threshold 0.67` |
-| `accuracy <pct>` | 目标可利用度 % | `accuracy 0.5` |
-| `iterations <n>` | 设置迭代次数 | `iterations 500` |
-| `threads <n>` | 设置线程数 | `threads 4` |
-| `solve` | 开始求解 | `solve` |
+| `accuracy <pct>` | 收敛精度 | `accuracy 0.5` |
+| `iterations <n>` | 迭代次数 | `iterations 500` |
+| `threads <n>` | 线程数 | `threads 4` |
+| `solve` | 开始求解 | |
 | `export <file>` | 导出 JSON | `export result.json` |
-| `help` | 显示帮助 | `help` |
-| `quit` | 退出 | `quit` |
+| `help` | 帮助 | |
+| `quit` | 退出 | |
 
 ---
 
 ## 🗺️ 路线图
 
-- [x] DCFR 核心算法
-- [x] 素数积哈希手牌评估
-- [x] 预计算 matchup 缓存
+### ✅ 核心功能
+
+- [x] DCFR 核心算法 + Best Response 可利用度计算
+- [x] 素数积哈希手牌评估 (O(1) 查表)
 - [x] Flop / Turn / River 全街支持
-- [x] 自定义 bet/raise 尺寸
-- [x] 标准范围语法解析
-- [x] JSON 策略导出
-- [x] 交互式 REPL
-- [x] 多线程并行 CFR 迭代 (Chance 节点级并行 + Thread-Local 累加器)
-- [x] 花色同构 (suit isomorphism) 降低信息集数量 (最高 71% 降维)
-- [x] Best Response 可利用度计算 (迭代中实时跟踪 exploit %)
-- [x] 带权重范围解析 (`AA:0.75` 语法)
-- [x] All-in 阈值 (自动合并接近 all-in 的下注尺寸)
-- [x] 收敛精度停止 (达到目标可利用度自动停止)
-- [x] OOP/IP 分玩家独立下注配置
-- [x] Donk Bet 支持 (检测反主动下注场景 + 独立尺寸)
+- [x] 标准范围语法解析 (带权重 `AA:0.75`)
+- [x] OOP/IP 分玩家独立下注配置 + Donk Bet
+- [x] All-in 阈值 + 收敛精度停止
+- [x] 多线程并行 (Chance 节点级 + Thread-Local 累加器)
+- [x] 花色同构 (最高 71% 降维)
+- [x] JSON 策略导出 + 交互式 REPL
+
+### ✅ 性能优化 (累计 165-234x 加速)
+
 - [x] O(M+N) 排序扫描 Showdown (RiverSortedRange 缓存 + 双指针扫描)
-- [x] O(M+N) 牌面排除 Fold (预计算 card_sum[52] 快速求值)
-- [x] Chance 节点零分配优化 (预分配缓冲区消除循环内 heap 分配)
+- [x] O(M+N) 牌面排除 Fold (card_sum[52] 快速求值)
+- [x] Chance 节点零 heap 分配 (预分配缓冲区复用)
+- [x] 无拷贝 reach 传递 (未修改侧直接传引用)
+- [x] Flat 策略数组 + 合并 regret/strategy 更新循环
+- [x] Hand mask 构造时缓存
+- [x] DCFR 单遍折扣 + 自适应 exploitability 频率
+
+### 🔲 计划中
+
 - [ ] CFR+ 算法变体
 - [ ] JSON 博弈树导入/导出
+- [ ] Chance 节点花色同构 (减少 deal 遍历次数)
 - [ ] 短牌 (Short Deck / 6+) 支持
 - [ ] Python 绑定 (pybind11)
 - [ ] GUI 可视化界面

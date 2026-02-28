@@ -96,22 +96,18 @@ void StrategyStorage::get_average_strategy(int node_idx, int hand_idx,
 void StrategyStorage::discount(int iteration) {
     double t = static_cast<double>(iteration);
     double pos_discount = std::pow(t, 1.5) / (std::pow(t, 1.5) + 1.0);
-    double neg_discount = 0.0;
+    // neg_discount = 0.0 means negative regrets are zeroed
     double strat_discount = std::pow(t / (t + 1.0), 2.0);
 
     size_t total = regrets_.size();
+    float pd = static_cast<float>(pos_discount);
+    float sd = static_cast<float>(strat_discount);
     
+    // Single pass: merge regret discount + strategy sum discount
     for (size_t i = 0; i < total; ++i) {
         float r = regrets_[i];
-        if (r > 0) {
-            regrets_[i] = static_cast<float>(r * pos_discount);
-        } else {
-            regrets_[i] = static_cast<float>(r * neg_discount);
-        }
-    }
-
-    for (size_t i = 0; i < total; ++i) {
-        strategy_sums_[i] = static_cast<float>(strategy_sums_[i] * strat_discount);
+        regrets_[i] = (r > 0) ? r * pd : 0.0f;
+        strategy_sums_[i] *= sd;
     }
 }
 
@@ -329,30 +325,41 @@ void CFRSolver::solve() {
         auto iter_end = std::chrono::high_resolution_clock::now();
         double iter_ms = std::chrono::duration<double, std::milli>(iter_end - iter_start).count();
 
-        if (config_.print_progress && (iter % config_.print_interval == 0 || iter == 1)) {
-            double elapsed = std::chrono::duration<double>(iter_end - total_start).count();
-            double avg_ms = elapsed * 1000.0 / iter;
-            double eta = avg_ms * (config_.num_iterations - iter) / 1000.0;
+        if (config_.print_progress) {
+            // Adaptive exploitability frequency: expensive on Flop/Turn trees
+            // Compute less frequently as iterations increase
+            bool should_print = (iter == 1) ||
+                (iter <= 20 && iter % config_.print_interval == 0) ||
+                (iter <= 100 && iter % (config_.print_interval * 2) == 0) ||
+                (iter <= 500 && iter % (config_.print_interval * 5) == 0) ||
+                (iter > 500 && iter % (config_.print_interval * 10) == 0) ||
+                (iter == config_.num_iterations);
             
-            double exploit = compute_exploitability();
+            if (should_print) {
+                double elapsed = std::chrono::duration<double>(iter_end - total_start).count();
+                double avg_ms = elapsed * 1000.0 / iter;
+                double eta = avg_ms * (config_.num_iterations - iter) / 1000.0;
             
-            std::cout << "  Iter " << std::setw(4) << iter 
-                      << " | " << std::fixed << std::setprecision(1) 
-                      << iter_ms << " ms"
-                      << " | avg " << avg_ms << " ms"
-                      << " | ETA " << std::setprecision(0) << eta << "s"
-                      << " | exploit " << std::setprecision(3) << exploit << "%"
-                      << std::endl;
+                double exploit = compute_exploitability();
             
-            // Early stopping: check if exploitability is below target
-            if (config_.target_exploitability > 0 && 
-                std::abs(exploit) < config_.target_exploitability) {
-                std::cout << "  >>> Converged! Exploitability " 
-                          << std::setprecision(3) << std::abs(exploit) 
-                          << "% < target " << config_.target_exploitability << "%\n";
-                converged = true;
-                final_iter = iter;
-                break;
+                std::cout << "  Iter " << std::setw(4) << iter 
+                          << " | " << std::fixed << std::setprecision(1) 
+                          << iter_ms << " ms"
+                          << " | avg " << avg_ms << " ms"
+                          << " | ETA " << std::setprecision(0) << eta << "s"
+                          << " | exploit " << std::setprecision(3) << exploit << "%"
+                          << std::endl;
+            
+                // Early stopping: check if exploitability is below target
+                if (config_.target_exploitability > 0 && 
+                    std::abs(exploit) < config_.target_exploitability) {
+                    std::cout << "  >>> Converged! Exploitability " 
+                              << std::setprecision(3) << std::abs(exploit) 
+                              << "% < target " << config_.target_exploitability << "%\n";
+                    converged = true;
+                    final_iter = iter;
+                    break;
+                }
             }
         }
     }
@@ -426,94 +433,65 @@ void CFRSolver::cfr_traverse(
     int num_actions = node->num_actions();
     int num_acting_hands = static_cast<int>(acting_range.size());
     int num_trav_hands = static_cast<int>(trav_range.size());
+    bool acting_is_oop = (acting_player == 0);
 
-    // Get current strategy for all hands of the acting player
-    // Use canonical index for storage lookup
-    std::vector<std::vector<float>> strategies(num_acting_hands, std::vector<float>(num_actions));
+    // Flat strategy array: strategies[h * num_actions + a]
+    std::vector<float> strategies(num_acting_hands * num_actions);
     for (int h = 0; h < num_acting_hands; ++h) {
         int ci = get_canonical_index(acting_player, h);
-        storage_.get_current_strategy(node->node_index, ci, num_actions, strategies[h].data());
+        storage_.get_current_strategy(node->node_index, ci, num_actions,
+                                       &strategies[h * num_actions]);
+    }
+
+    // Pre-allocate: one buffer for modified reach, reused per action
+    std::vector<float> modified_reach(num_acting_hands);
+    
+    // Action values: separate vectors needed (passed as output ref to recursive calls)
+    std::vector<std::vector<float>> action_values(num_actions,
+        std::vector<float>(num_trav_hands, 0.0f));
+
+    const auto& act_reach = acting_is_oop ? oop_reach : ip_reach;
+
+    for (int a = 0; a < num_actions; ++a) {
+        // Only modify acting player's reach; pass other by reference (no copy)
+        for (int h = 0; h < num_acting_hands; ++h) {
+            modified_reach[h] = act_reach[h] * strategies[h * num_actions + a];
+        }
+
+        if (acting_is_oop) {
+            cfr_traverse(node->children[a].get(), traversing_player,
+                         modified_reach, ip_reach, action_values[a],
+                         dead_cards, iteration);
+        } else {
+            cfr_traverse(node->children[a].get(), traversing_player,
+                         oop_reach, modified_reach, action_values[a],
+                         dead_cards, iteration);
+        }
     }
 
     if (acting_player == traversing_player) {
-        std::vector<std::vector<float>> action_values(num_actions, 
-            std::vector<float>(num_trav_hands, 0.0f));
-
-        for (int a = 0; a < num_actions; ++a) {
-            std::vector<float> new_oop_reach, new_ip_reach;
-            
-            if (traversing_player == 0) {
-                new_oop_reach.resize(oop_reach.size());
-                for (int h = 0; h < num_trav_hands; ++h) {
-                    new_oop_reach[h] = oop_reach[h] * strategies[h][a];
-                }
-                new_ip_reach = ip_reach;
-            } else {
-                new_oop_reach = oop_reach;
-                new_ip_reach.resize(ip_reach.size());
-                for (int h = 0; h < num_trav_hands; ++h) {
-                    new_ip_reach[h] = ip_reach[h] * strategies[h][a];
-                }
-            }
-
-            cfr_traverse(node->children[a].get(), traversing_player,
-                         new_oop_reach, new_ip_reach, action_values[a],
-                         dead_cards, iteration);
-        }
-
         // Compute node values
         hand_values.assign(num_trav_hands, 0.0f);
         for (int h = 0; h < num_trav_hands; ++h) {
             for (int a = 0; a < num_actions; ++a) {
-                hand_values[h] += strategies[h][a] * action_values[a][h];
+                hand_values[h] += strategies[h * num_actions + a] * action_values[a][h];
             }
         }
 
-        // Update regrets using canonical index
-        for (int h = 0; h < num_trav_hands; ++h) {
-            int ci = get_canonical_index(traversing_player, h);
-            for (int a = 0; a < num_actions; ++a) {
-                float regret_delta = action_values[a][h] - hand_values[h];
-                storage_.regret(node->node_index, ci, a) += regret_delta;
-            }
-        }
-
-        // Update strategy sums using canonical index
+        // Merged: update regrets + strategy sums in single pass
         const auto& reach = (traversing_player == 0) ? oop_reach : ip_reach;
         for (int h = 0; h < num_trav_hands; ++h) {
             int ci = get_canonical_index(traversing_player, h);
+            float node_val = hand_values[h];
+            float r = reach[h];
             for (int a = 0; a < num_actions; ++a) {
-                storage_.strategy_sum(node->node_index, ci, a) += 
-                    reach[h] * strategies[h][a];
+                storage_.regret(node->node_index, ci, a) += action_values[a][h] - node_val;
+                storage_.strategy_sum(node->node_index, ci, a) += r * strategies[h * num_actions + a];
             }
         }
 
     } else {
-        std::vector<std::vector<float>> action_values(num_actions,
-            std::vector<float>(num_trav_hands, 0.0f));
-
-        for (int a = 0; a < num_actions; ++a) {
-            std::vector<float> new_oop_reach, new_ip_reach;
-
-            if (acting_player == 0) {
-                new_oop_reach.resize(oop_reach.size());
-                for (int h = 0; h < num_acting_hands; ++h) {
-                    new_oop_reach[h] = oop_reach[h] * strategies[h][a];
-                }
-                new_ip_reach = ip_reach;
-            } else {
-                new_oop_reach = oop_reach;
-                new_ip_reach.resize(ip_reach.size());
-                for (int h = 0; h < num_acting_hands; ++h) {
-                    new_ip_reach[h] = ip_reach[h] * strategies[h][a];
-                }
-            }
-
-            cfr_traverse(node->children[a].get(), traversing_player,
-                         new_oop_reach, new_ip_reach, action_values[a],
-                         dead_cards, iteration);
-        }
-
+        // Opponent's node: just sum action values
         hand_values.assign(num_trav_hands, 0.0f);
         for (int a = 0; a < num_actions; ++a) {
             for (int h = 0; h < num_trav_hands; ++h) {
@@ -664,92 +642,62 @@ void CFRSolver::cfr_traverse_threaded(
     int num_actions = node->num_actions();
     int num_acting_hands = static_cast<int>(acting_range.size());
     int num_trav_hands = static_cast<int>(trav_range.size());
+    bool acting_is_oop = (acting_player == 0);
 
-    // Get current strategy using canonical index
-    std::vector<std::vector<float>> strategies(num_acting_hands, std::vector<float>(num_actions));
+    // Flat strategy array: strategies[h * num_actions + a]
+    std::vector<float> strategies(num_acting_hands * num_actions);
     for (int h = 0; h < num_acting_hands; ++h) {
         int ci = get_canonical_index(acting_player, h);
-        storage_.get_current_strategy(node->node_index, ci, num_actions, strategies[h].data());
+        storage_.get_current_strategy(node->node_index, ci, num_actions,
+                                       &strategies[h * num_actions]);
+    }
+
+    // Pre-allocate modified reach buffer
+    std::vector<float> modified_reach(num_acting_hands);
+    
+    std::vector<std::vector<float>> action_values(num_actions,
+        std::vector<float>(num_trav_hands, 0.0f));
+
+    const auto& act_reach = acting_is_oop ? oop_reach : ip_reach;
+
+    for (int a = 0; a < num_actions; ++a) {
+        for (int h = 0; h < num_acting_hands; ++h) {
+            modified_reach[h] = act_reach[h] * strategies[h * num_actions + a];
+        }
+
+        if (acting_is_oop) {
+            cfr_traverse_threaded(node->children[a].get(), traversing_player,
+                                  modified_reach, ip_reach, action_values[a],
+                                  dead_cards, iteration, accum);
+        } else {
+            cfr_traverse_threaded(node->children[a].get(), traversing_player,
+                                  oop_reach, modified_reach, action_values[a],
+                                  dead_cards, iteration, accum);
+        }
     }
 
     if (acting_player == traversing_player) {
-        std::vector<std::vector<float>> action_values(num_actions, 
-            std::vector<float>(num_trav_hands, 0.0f));
-
-        for (int a = 0; a < num_actions; ++a) {
-            std::vector<float> new_oop_reach, new_ip_reach;
-            
-            if (traversing_player == 0) {
-                new_oop_reach.resize(oop_reach.size());
-                for (int h = 0; h < num_trav_hands; ++h) {
-                    new_oop_reach[h] = oop_reach[h] * strategies[h][a];
-                }
-                new_ip_reach = ip_reach;
-            } else {
-                new_oop_reach = oop_reach;
-                new_ip_reach.resize(ip_reach.size());
-                for (int h = 0; h < num_trav_hands; ++h) {
-                    new_ip_reach[h] = ip_reach[h] * strategies[h][a];
-                }
-            }
-
-            cfr_traverse_threaded(node->children[a].get(), traversing_player,
-                                  new_oop_reach, new_ip_reach, action_values[a],
-                                  dead_cards, iteration, accum);
-        }
-
         hand_values.assign(num_trav_hands, 0.0f);
         for (int h = 0; h < num_trav_hands; ++h) {
             for (int a = 0; a < num_actions; ++a) {
-                hand_values[h] += strategies[h][a] * action_values[a][h];
+                hand_values[h] += strategies[h * num_actions + a] * action_values[a][h];
             }
         }
 
-        // Write regret deltas using canonical index
-        for (int h = 0; h < num_trav_hands; ++h) {
-            int ci = get_canonical_index(traversing_player, h);
-            for (int a = 0; a < num_actions; ++a) {
-                float regret_delta = action_values[a][h] - hand_values[h];
-                size_t idx = storage_.index(node->node_index, ci, a);
-                accum.regret_delta(idx) += regret_delta;
-            }
-        }
-
+        // Merged: regret deltas + strategy deltas in single pass
         const auto& reach = (traversing_player == 0) ? oop_reach : ip_reach;
         for (int h = 0; h < num_trav_hands; ++h) {
             int ci = get_canonical_index(traversing_player, h);
+            float node_val = hand_values[h];
+            float r = reach[h];
             for (int a = 0; a < num_actions; ++a) {
                 size_t idx = storage_.index(node->node_index, ci, a);
-                accum.strategy_delta(idx) += reach[h] * strategies[h][a];
+                accum.regret_delta(idx) += action_values[a][h] - node_val;
+                accum.strategy_delta(idx) += r * strategies[h * num_actions + a];
             }
         }
 
     } else {
-        std::vector<std::vector<float>> action_values(num_actions,
-            std::vector<float>(num_trav_hands, 0.0f));
-
-        for (int a = 0; a < num_actions; ++a) {
-            std::vector<float> new_oop_reach, new_ip_reach;
-
-            if (acting_player == 0) {
-                new_oop_reach.resize(oop_reach.size());
-                for (int h = 0; h < num_acting_hands; ++h) {
-                    new_oop_reach[h] = oop_reach[h] * strategies[h][a];
-                }
-                new_ip_reach = ip_reach;
-            } else {
-                new_oop_reach = oop_reach;
-                new_ip_reach.resize(ip_reach.size());
-                for (int h = 0; h < num_acting_hands; ++h) {
-                    new_ip_reach[h] = ip_reach[h] * strategies[h][a];
-                }
-            }
-
-            cfr_traverse_threaded(node->children[a].get(), traversing_player,
-                                  new_oop_reach, new_ip_reach, action_values[a],
-                                  dead_cards, iteration, accum);
-        }
-
         hand_values.assign(num_trav_hands, 0.0f);
         for (int a = 0; a < num_actions; ++a) {
             for (int h = 0; h < num_trav_hands; ++h) {
@@ -1235,35 +1183,25 @@ void CFRSolver::best_response_traverse(
     int num_actions = node->num_actions();
     int num_acting_hands = static_cast<int>(acting_range.size());
     int num_trav_hands = static_cast<int>(trav_range.size());
+    bool acting_is_oop = (acting_player == 0);
 
-    // Get average strategy for the acting player (the converged strategy)
-    std::vector<std::vector<float>> strategies(num_acting_hands, std::vector<float>(num_actions));
+    // Flat strategy array
+    std::vector<float> strategies(num_acting_hands * num_actions);
     for (int h = 0; h < num_acting_hands; ++h) {
         int ci = get_canonical_index(acting_player, h);
-        storage_.get_average_strategy(node->node_index, ci, num_actions, strategies[h].data());
+        storage_.get_average_strategy(node->node_index, ci, num_actions,
+                                       &strategies[h * num_actions]);
     }
 
     if (acting_player == br_player) {
-        // BR player's node: pick the action that maximizes value FOR EACH HAND
+        // BR player's node: try each action, pick best per hand
+        // No reach modification needed — pass as-is
         std::vector<std::vector<float>> action_values(num_actions,
             std::vector<float>(num_trav_hands, 0.0f));
 
         for (int a = 0; a < num_actions; ++a) {
-            std::vector<float> new_oop_reach, new_ip_reach;
-
-            if (br_player == 0) {
-                // BR player is OOP: for BR, reach = 1 for all hands (we try each)
-                // But we need to pass through the reach for the subtree correctly
-                // For BR player, we don't scale reach by strategy (we try each action independently)
-                new_oop_reach = oop_reach; // BR player reach stays as-is
-                new_ip_reach = ip_reach;
-            } else {
-                new_oop_reach = oop_reach;
-                new_ip_reach = ip_reach; // BR player reach stays as-is
-            }
-
             best_response_traverse(node->children[a].get(), br_player,
-                                   new_oop_reach, new_ip_reach, action_values[a],
+                                   oop_reach, ip_reach, action_values[a],
                                    dead_cards);
         }
 
@@ -1279,32 +1217,29 @@ void CFRSolver::best_response_traverse(
 
     } else {
         // Opponent's node: follow opponent's average strategy
+        std::vector<float> modified_reach(num_acting_hands);
         std::vector<std::vector<float>> action_values(num_actions,
             std::vector<float>(num_trav_hands, 0.0f));
 
-        for (int a = 0; a < num_actions; ++a) {
-            std::vector<float> new_oop_reach, new_ip_reach;
+        const auto& act_reach = acting_is_oop ? oop_reach : ip_reach;
 
-            if (acting_player == 0) {
-                new_oop_reach.resize(oop_reach.size());
-                for (int h = 0; h < num_acting_hands; ++h) {
-                    new_oop_reach[h] = oop_reach[h] * strategies[h][a];
-                }
-                new_ip_reach = ip_reach;
-            } else {
-                new_oop_reach = oop_reach;
-                new_ip_reach.resize(ip_reach.size());
-                for (int h = 0; h < num_acting_hands; ++h) {
-                    new_ip_reach[h] = ip_reach[h] * strategies[h][a];
-                }
+        for (int a = 0; a < num_actions; ++a) {
+            for (int h = 0; h < num_acting_hands; ++h) {
+                modified_reach[h] = act_reach[h] * strategies[h * num_actions + a];
             }
 
-            best_response_traverse(node->children[a].get(), br_player,
-                                   new_oop_reach, new_ip_reach, action_values[a],
-                                   dead_cards);
+            if (acting_is_oop) {
+                best_response_traverse(node->children[a].get(), br_player,
+                                       modified_reach, ip_reach, action_values[a],
+                                       dead_cards);
+            } else {
+                best_response_traverse(node->children[a].get(), br_player,
+                                       oop_reach, modified_reach, action_values[a],
+                                       dead_cards);
+            }
         }
 
-        // Sum action values (opponent's strategy is incorporated via reach)
+        // Sum action values
         hand_values.assign(num_trav_hands, 0.0f);
         for (int a = 0; a < num_actions; ++a) {
             for (int h = 0; h < num_trav_hands; ++h) {

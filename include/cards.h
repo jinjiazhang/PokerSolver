@@ -167,20 +167,20 @@ IsomorphismMap build_isomorphism_map(const Board& board, const std::vector<Hand>
 struct Hand {
     int cards[2];
     float weight = 1.0f;
+    CardMask mask_ = 0;  // cached bitmask (computed once at construction)
 
-    Hand() : cards{-1, -1}, weight(1.0f) {}
+    Hand() : cards{-1, -1}, weight(1.0f), mask_(0) {}
     Hand(int c0, int c1, float w = 1.0f) : weight(w) {
         // Always store in sorted order (lower first)
         if (c0 < c1) { cards[0] = c0; cards[1] = c1; }
         else          { cards[0] = c1; cards[1] = c0; }
+        mask_ = card_mask(cards[0]) | card_mask(cards[1]);
     }
 
-    CardMask mask() const {
-        return card_mask(cards[0]) | card_mask(cards[1]);
-    }
+    CardMask mask() const { return mask_; }
 
     bool conflicts_with(CardMask board_mask) const {
-        return (mask() & board_mask) != 0;
+        return (mask_ & board_mask) != 0;
     }
 
     // Unique index for hand combo (0 to C(52,2)-1)
