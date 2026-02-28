@@ -551,8 +551,14 @@ void CFRSolver::cfr_traverse_chance(
 {
     const auto& trav_range = get_range(traversing_player);
     int num_trav_hands = static_cast<int>(trav_range.size());
+    int num_oop = static_cast<int>(oop_range_.size());
+    int num_ip = static_cast<int>(ip_range_.size());
     hand_values.assign(num_trav_hands, 0.0f);
 
+    // Pre-allocate buffers once, reuse for each deal card
+    std::vector<float> new_oop_reach(num_oop);
+    std::vector<float> new_ip_reach(num_ip);
+    std::vector<float> card_values(num_trav_hands);
     int num_deals = 0;
     
     for (int card = 0; card < NUM_CARDS; ++card) {
@@ -560,25 +566,14 @@ void CFRSolver::cfr_traverse_chance(
 
         CardMask new_dead = mask_add_card(dead_cards, card);
         
-        std::vector<float> new_oop_reach(oop_reach.size());
-        for (int h = 0; h < static_cast<int>(oop_range_.size()); ++h) {
-            if (mask_has_card(oop_range_[h].mask(), card)) {
-                new_oop_reach[h] = 0.0f;
-            } else {
-                new_oop_reach[h] = oop_reach[h];
-            }
+        for (int h = 0; h < num_oop; ++h) {
+            new_oop_reach[h] = mask_has_card(oop_range_[h].mask(), card) ? 0.0f : oop_reach[h];
+        }
+        for (int h = 0; h < num_ip; ++h) {
+            new_ip_reach[h] = mask_has_card(ip_range_[h].mask(), card) ? 0.0f : ip_reach[h];
         }
 
-        std::vector<float> new_ip_reach(ip_reach.size());
-        for (int h = 0; h < static_cast<int>(ip_range_.size()); ++h) {
-            if (mask_has_card(ip_range_[h].mask(), card)) {
-                new_ip_reach[h] = 0.0f;
-            } else {
-                new_ip_reach[h] = ip_reach[h];
-            }
-        }
-
-        std::vector<float> card_values(num_trav_hands, 0.0f);
+        std::fill(card_values.begin(), card_values.end(), 0.0f);
         
         cfr_traverse(node->children[0].get(), traversing_player,
                      new_oop_reach, new_ip_reach, card_values,
@@ -796,6 +791,8 @@ void CFRSolver::cfr_traverse_chance_parallel(
 {
     const auto& trav_range = get_range(traversing_player);
     int num_trav_hands = static_cast<int>(trav_range.size());
+    int num_oop = static_cast<int>(oop_range_.size());
+    int num_ip = static_cast<int>(ip_range_.size());
     hand_values.assign(num_trav_hands, 0.0f);
 
     int num_threads = std::max(1, config_.num_threads);
@@ -825,29 +822,23 @@ void CFRSolver::cfr_traverse_chance_parallel(
         ThreadLocalAccumulator& accum = thread_accumulators_[thread_id];
         auto& result = thread_results[thread_id];
 
+        // Pre-allocate buffers per thread, reuse for each deal
+        std::vector<float> new_oop_reach(num_oop);
+        std::vector<float> new_ip_reach(num_ip);
+        std::vector<float> card_values(num_trav_hands);
+
         for (int d = start_deal; d < end_deal; ++d) {
             int card = deal_cards[d];
             CardMask new_dead = mask_add_card(dead_cards, card);
 
-            std::vector<float> new_oop_reach(oop_reach.size());
-            for (int h = 0; h < static_cast<int>(oop_range_.size()); ++h) {
-                if (mask_has_card(oop_range_[h].mask(), card)) {
-                    new_oop_reach[h] = 0.0f;
-                } else {
-                    new_oop_reach[h] = oop_reach[h];
-                }
+            for (int h = 0; h < num_oop; ++h) {
+                new_oop_reach[h] = mask_has_card(oop_range_[h].mask(), card) ? 0.0f : oop_reach[h];
+            }
+            for (int h = 0; h < num_ip; ++h) {
+                new_ip_reach[h] = mask_has_card(ip_range_[h].mask(), card) ? 0.0f : ip_reach[h];
             }
 
-            std::vector<float> new_ip_reach(ip_reach.size());
-            for (int h = 0; h < static_cast<int>(ip_range_.size()); ++h) {
-                if (mask_has_card(ip_range_[h].mask(), card)) {
-                    new_ip_reach[h] = 0.0f;
-                } else {
-                    new_ip_reach[h] = ip_reach[h];
-                }
-            }
-
-            std::vector<float> card_values(num_trav_hands, 0.0f);
+            std::fill(card_values.begin(), card_values.end(), 0.0f);
 
             cfr_traverse_threaded(node->children[0].get(), traversing_player,
                                   new_oop_reach, new_ip_reach, card_values,
@@ -920,7 +911,133 @@ void CFRSolver::merge_accumulators() {
 }
 
 // ============================================================================
-// Payoff computations (unchanged, read-only, thread-safe)
+// Sorted range cache for O(M+N) showdown
+// ============================================================================
+
+const RiverSortedRange& CFRSolver::get_sorted_range(int player, CardMask board_mask) const {
+    {
+        std::lock_guard<std::mutex> lock(sorted_range_mutex_);
+        auto it = sorted_range_cache_.find(board_mask);
+        if (it != sorted_range_cache_.end()) {
+            return it->second[player];
+        }
+    }
+
+    // Build sorted ranges for both players on this board
+    const auto& eval = get_evaluator();
+    int board_count = mask_count(board_mask & FULL_DECK_MASK);
+    std::array<RiverSortedRange, 2> ranges;
+
+    for (int p = 0; p < 2; ++p) {
+        const auto& range = get_range(p);
+        int num_hands = static_cast<int>(range.size());
+        ranges[p].hands.reserve(num_hands);
+
+        for (int h = 0; h < num_hands; ++h) {
+            const Hand& hand = range[h];
+            if (hand.conflicts_with(board_mask)) continue;
+
+            RankedHand rh;
+            rh.rank = eval.evaluate(board_mask, board_count, hand);
+            rh.hand_index = h;
+            rh.card1 = hand.cards[0];
+            rh.card2 = hand.cards[1];
+            ranges[p].hands.push_back(rh);
+        }
+
+        // Sort descending by rank
+        std::sort(ranges[p].hands.begin(), ranges[p].hands.end());
+    }
+
+    std::lock_guard<std::mutex> lock(sorted_range_mutex_);
+    auto [it, _] = sorted_range_cache_.emplace(board_mask, std::move(ranges));
+    return it->second[player];
+}
+
+// ============================================================================
+// O(M+N) sorted sweep showdown
+// ============================================================================
+
+void CFRSolver::compute_showdown_sorted(
+    int traversing_player,
+    double pot,
+    const std::vector<float>& oop_reach,
+    const std::vector<float>& ip_reach,
+    std::vector<float>& hand_values,
+    CardMask board_mask) const
+{
+    int opp_player = 1 - traversing_player;
+    const auto& trav_sorted = get_sorted_range(traversing_player, board_mask);
+    const auto& opp_sorted = get_sorted_range(opp_player, board_mask);
+    const auto& opp_reach_vec = (traversing_player == 0) ? ip_reach : oop_reach;
+    const auto& trav_range = get_range(traversing_player);
+    int num_trav = static_cast<int>(trav_range.size());
+
+    hand_values.assign(num_trav, 0.0f);
+    float half_pot = static_cast<float>(pot / 2.0);
+
+    const auto& trav_hands = trav_sorted.hands;
+    const auto& opp_hands = opp_sorted.hands;
+    int num_trav_sorted = static_cast<int>(trav_hands.size());
+    int num_opp_sorted = static_cast<int>(opp_hands.size());
+
+    if (num_trav_sorted == 0 || num_opp_sorted == 0) return;
+
+    // Pass 1: compute winning payoffs (traverse from strongest to weakest)
+    // For each trav hand, sum up opp reach of hands that are WEAKER
+    {
+        float winsum = 0.0f;
+        float card_winsum[52] = {};
+
+        int j = 0;
+        for (int i = 0; i < num_trav_sorted; ++i) {
+            const auto& th = trav_hands[i];
+            // Advance j to include all opp hands with rank < trav rank (weaker)
+            while (j < num_opp_sorted && opp_hands[j].rank > th.rank) {
+                const auto& oh = opp_hands[j];
+                float r = opp_reach_vec[oh.hand_index];
+                winsum += r;
+                card_winsum[oh.card1] += r;
+                card_winsum[oh.card2] += r;
+                j++;
+            }
+            // winsum includes all opp hands strictly weaker than trav
+            // Subtract card conflicts (opp hands that share a card with trav)
+            hand_values[th.hand_index] = (winsum
+                                          - card_winsum[th.card1]
+                                          - card_winsum[th.card2]
+                                         ) * half_pot;
+        }
+    }
+
+    // Pass 2: compute losing payoffs (traverse from weakest to strongest)
+    {
+        float losssum = 0.0f;
+        float card_losssum[52] = {};
+
+        int j = num_opp_sorted - 1;
+        for (int i = num_trav_sorted - 1; i >= 0; --i) {
+            const auto& th = trav_hands[i];
+            // Advance j to include all opp hands with rank > trav rank (stronger)
+            while (j >= 0 && opp_hands[j].rank < th.rank) {
+                const auto& oh = opp_hands[j];
+                float r = opp_reach_vec[oh.hand_index];
+                losssum += r;
+                card_losssum[oh.card1] += r;
+                card_losssum[oh.card2] += r;
+                j--;
+            }
+            // losssum includes all opp hands strictly stronger than trav
+            hand_values[th.hand_index] -= (losssum
+                                           - card_losssum[th.card1]
+                                           - card_losssum[th.card2]
+                                          ) * half_pot;
+        }
+    }
+}
+
+// ============================================================================
+// Payoff computations — optimized O(M+N) algorithms
 // ============================================================================
 
 void CFRSolver::compute_showdown_payoffs(
@@ -931,78 +1048,50 @@ void CFRSolver::compute_showdown_payoffs(
     std::vector<float>& hand_values,
     CardMask dead_cards) const
 {
+    // For any 5-card board (river), use O(M+N) sorted sweep
+    int board_count = mask_count(dead_cards & FULL_DECK_MASK);
+    if (board_count >= 5) {
+        compute_showdown_sorted(traversing_player, pot, oop_reach, ip_reach,
+                                hand_values, dead_cards);
+        return;
+    }
+
+    // Fallback for non-river boards (shouldn't normally happen — showdowns are at river)
     const auto& trav_range = get_range(traversing_player);
     const auto& opp_range = get_range(1 - traversing_player);
     const auto& opp_reach = (traversing_player == 0) ? ip_reach : oop_reach;
-    
     int num_trav = static_cast<int>(trav_range.size());
     int num_opp = static_cast<int>(opp_range.size());
-    int num_ip = static_cast<int>(ip_range_.size());
-    
+
     hand_values.assign(num_trav, 0.0f);
     float half_pot = static_cast<float>(pot / 2.0);
+    const auto& eval = get_evaluator();
 
-    if (has_precomputed_matchups_ && dead_cards == game_params_.board.mask) {
-        for (int t = 0; t < num_trav; ++t) {
-            const Hand& trav_hand = trav_range[t];
-            if (trav_hand.conflicts_with(dead_cards)) continue;
+    for (int t = 0; t < num_trav; ++t) {
+        const Hand& trav_hand = trav_range[t];
+        if (trav_hand.conflicts_with(dead_cards)) continue;
+        uint16_t trav_rank = eval.evaluate(dead_cards, board_count, trav_hand);
 
-            float ev = 0.0f;
-            for (int o = 0; o < num_opp; ++o) {
-                const Hand& opp_hand = opp_range[o];
-                if (opp_hand.conflicts_with(dead_cards)) continue;
-                if (trav_hand.mask() & opp_hand.mask()) continue;
+        float ev = 0.0f;
+        for (int o = 0; o < num_opp; ++o) {
+            const Hand& opp_hand = opp_range[o];
+            if (opp_hand.conflicts_with(dead_cards)) continue;
+            if (trav_hand.mask() & opp_hand.mask()) continue;
+            float opp_r = opp_reach[o];
+            if (opp_r <= 0) continue;
 
-                float opp_r = opp_reach[o];
-                if (opp_r <= 0) continue;
-
-                int8_t result;
-                if (traversing_player == 0) {
-                    result = matchup_cache_[static_cast<size_t>(t) * num_ip + o];
-                } else {
-                    result = -matchup_cache_[static_cast<size_t>(o) * num_ip + t];
-                }
-
-                if (result > 0) {
-                    ev += opp_r * half_pot;
-                } else if (result < 0) {
-                    ev -= opp_r * half_pot;
-                }
-            }
-            hand_values[t] = ev;
+            uint16_t opp_rank = eval.evaluate(dead_cards, board_count, opp_hand);
+            int cmp = HandEvaluator::compare(trav_rank, opp_rank);
+            if (cmp > 0) ev += opp_r * half_pot;
+            else if (cmp < 0) ev -= opp_r * half_pot;
         }
-    } else {
-        const auto& eval = get_evaluator();
-        int board_count = mask_count(dead_cards & FULL_DECK_MASK);
-
-        for (int t = 0; t < num_trav; ++t) {
-            const Hand& trav_hand = trav_range[t];
-            if (trav_hand.conflicts_with(dead_cards)) continue;
-
-            uint16_t trav_rank = eval.evaluate(dead_cards, board_count, trav_hand);
-
-            float ev = 0.0f;
-            for (int o = 0; o < num_opp; ++o) {
-                const Hand& opp_hand = opp_range[o];
-                if (opp_hand.conflicts_with(dead_cards)) continue;
-                if (trav_hand.mask() & opp_hand.mask()) continue;
-
-                float opp_r = opp_reach[o];
-                if (opp_r <= 0) continue;
-                
-                uint16_t opp_rank = eval.evaluate(dead_cards, board_count, opp_hand);
-
-                int cmp = HandEvaluator::compare(trav_rank, opp_rank);
-                if (cmp > 0) {
-                    ev += opp_r * half_pot;
-                } else if (cmp < 0) {
-                    ev -= opp_r * half_pot;
-                }
-            }
-            hand_values[t] = ev;
-        }
+        hand_values[t] = ev;
     }
 }
+
+// ============================================================================
+// O(M+N) fold payoff using card-exclusion sum
+// ============================================================================
 
 void CFRSolver::compute_fold_payoffs(
     int traversing_player,
@@ -1016,34 +1105,45 @@ void CFRSolver::compute_fold_payoffs(
     const auto& trav_range = get_range(traversing_player);
     const auto& opp_range = get_range(1 - traversing_player);
     const auto& opp_reach = (traversing_player == 0) ? ip_reach : oop_reach;
-    
+
     int num_trav = static_cast<int>(trav_range.size());
     int num_opp = static_cast<int>(opp_range.size());
-    
-    hand_values.assign(num_trav, 0.0f);
-    double half_pot = pot / 2.0;
 
+    hand_values.assign(num_trav, 0.0f);
+    float half_pot = static_cast<float>(pot / 2.0);
+    float sign = (folder == traversing_player) ? -1.0f : 1.0f;
+    float payoff_per_reach = sign * half_pot;
+
+    // Precompute: total opponent reach sum, and per-card reach sum
+    float opp_sum = 0.0f;
+    float opp_card_sum[52] = {};
+
+    for (int o = 0; o < num_opp; ++o) {
+        const Hand& opp_hand = opp_range[o];
+        if (opp_hand.conflicts_with(dead_cards)) continue;
+        float r = opp_reach[o];
+        if (r <= 0) continue;
+        opp_sum += r;
+        opp_card_sum[opp_hand.cards[0]] += r;
+        opp_card_sum[opp_hand.cards[1]] += r;
+    }
+
+    // For each traverser hand: payoff = payoff_per_reach * (total_opp - conflicts)
+    // Conflicts = hands sharing a card = card_sum[c1] + card_sum[c2] - shared_exact
+    // We need to find if any opp hand has BOTH cards matching (impossible for 2-card hands with same deck)
+    // but we need to subtract the double-counted hand that has both c1 and c2
     for (int t = 0; t < num_trav; ++t) {
         const Hand& trav_hand = trav_range[t];
         if (trav_hand.conflicts_with(dead_cards)) continue;
 
-        float ev = 0.0f;
-        for (int o = 0; o < num_opp; ++o) {
-            const Hand& opp_hand = opp_range[o];
-            if (opp_hand.conflicts_with(dead_cards)) continue;
-            if (trav_hand.mask() & opp_hand.mask()) continue;
+        int c1 = trav_hand.cards[0];
+        int c2 = trav_hand.cards[1];
 
-            float opp_r = opp_reach[o];
-            if (opp_r <= 0) continue;
-
-            if (folder == traversing_player) {
-                ev -= opp_r * static_cast<float>(half_pot);
-            } else {
-                ev += opp_r * static_cast<float>(half_pot);
-            }
-        }
-
-        hand_values[t] = ev;
+        // effective_opp = opp_sum - card_sum[c1] - card_sum[c2]
+        // (No double-counting correction needed: no opp hand can have both c1 AND c2,
+        //  since that would be the same hand as the traverser.)
+        float effective_opp = opp_sum - opp_card_sum[c1] - opp_card_sum[c2];
+        hand_values[t] = payoff_per_reach * effective_opp;
     }
 }
 
@@ -1224,8 +1324,14 @@ void CFRSolver::best_response_chance(
 {
     const auto& trav_range = get_range(br_player);
     int num_trav_hands = static_cast<int>(trav_range.size());
+    int num_oop = static_cast<int>(oop_range_.size());
+    int num_ip = static_cast<int>(ip_range_.size());
     hand_values.assign(num_trav_hands, 0.0f);
 
+    // Pre-allocate buffers once, reuse for each deal
+    std::vector<float> new_oop_reach(num_oop);
+    std::vector<float> new_ip_reach(num_ip);
+    std::vector<float> card_values(num_trav_hands);
     int num_deals = 0;
 
     for (int card = 0; card < NUM_CARDS; ++card) {
@@ -1233,17 +1339,14 @@ void CFRSolver::best_response_chance(
 
         CardMask new_dead = mask_add_card(dead_cards, card);
 
-        std::vector<float> new_oop_reach(oop_reach.size());
-        for (int h = 0; h < static_cast<int>(oop_range_.size()); ++h) {
+        for (int h = 0; h < num_oop; ++h) {
             new_oop_reach[h] = mask_has_card(oop_range_[h].mask(), card) ? 0.0f : oop_reach[h];
         }
-
-        std::vector<float> new_ip_reach(ip_reach.size());
-        for (int h = 0; h < static_cast<int>(ip_range_.size()); ++h) {
+        for (int h = 0; h < num_ip; ++h) {
             new_ip_reach[h] = mask_has_card(ip_range_[h].mask(), card) ? 0.0f : ip_reach[h];
         }
 
-        std::vector<float> card_values(num_trav_hands, 0.0f);
+        std::fill(card_values.begin(), card_values.end(), 0.0f);
         best_response_traverse(node->children[0].get(), br_player,
                                new_oop_reach, new_ip_reach, card_values, new_dead);
 

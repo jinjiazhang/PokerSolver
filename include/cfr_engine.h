@@ -10,8 +10,21 @@
 #include <thread>
 #include <condition_variable>
 #include <queue>
+#include <unordered_map>
+#include <algorithm>
 
 namespace poker {
+
+// ============================================================================
+// RankedHand: hand sorted by showdown rank for O(M+N) sweep
+// ============================================================================
+struct RankedHand {
+    uint16_t rank;        // hand strength (higher = better)
+    int hand_index;       // index into the player's range
+    int card1, card2;     // the two hole cards (0..51)
+
+    bool operator<(const RankedHand& o) const { return rank > o.rank; } // sort descending
+};
 
 // ============================================================================
 // CFR Engine - Discounted Counterfactual Regret Minimization
@@ -132,6 +145,13 @@ struct ShowdownResult {
 };
 
 // ============================================================================
+// RiverSortedRange: cached sorted range for O(M+N) showdown sweep
+// ============================================================================
+struct RiverSortedRange {
+    std::vector<RankedHand> hands;  // sorted by rank descending
+};
+
+// ============================================================================
 // CFR Solver - with multi-threaded parallel iteration + suit isomorphism
 // ============================================================================
 class CFRSolver {
@@ -218,6 +238,23 @@ private:
     
     // Thread-local accumulators (one per thread)
     std::vector<ThreadLocalAccumulator> thread_accumulators_;
+
+    // Sorted range cache for O(M+N) showdown sweep
+    // Key: board CardMask, Value: sorted ranges per player
+    mutable std::unordered_map<CardMask, std::array<RiverSortedRange, 2>> sorted_range_cache_;
+    mutable std::mutex sorted_range_mutex_;
+
+    // Get or build sorted range for a given board
+    const RiverSortedRange& get_sorted_range(int player, CardMask board_mask) const;
+
+    // O(M+N) showdown using sorted sweep (used for non-precomputed boards)
+    void compute_showdown_sorted(
+        int traversing_player,
+        double pot,
+        const std::vector<float>& oop_reach,
+        const std::vector<float>& ip_reach,
+        std::vector<float>& hand_values,
+        CardMask board_mask) const;
     
     // Precompute hand ranks and matchups
     void precompute_matchups(CardMask board_mask);
