@@ -51,6 +51,7 @@ private:
     void cmd_set_range(int player, const std::string& args);
     void cmd_set_bet_sizes(Street street, const std::string& args);
     void cmd_set_raise_sizes(Street street, const std::string& args);
+    void cmd_set_sizing(const std::string& args); // Unified: set_bet_sizes <player>,<street>,<type>,<sizes>
     void cmd_set_iterations(const std::string& args);
     void cmd_set_threads(const std::string& args);
     void cmd_solve();

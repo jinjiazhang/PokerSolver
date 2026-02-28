@@ -43,9 +43,9 @@ std::unique_ptr<GameTreeNode> GameTreeBuilder::build() {
         start_street = Street::FLOP;
     }
 
-    // OOP (player 0) acts first
+    // OOP (player 0) acts first, not a donk on first street
     return build_action_node(0, start_street, params_.initial_pot, 
-                              params_.effective_stack, bets, 0, true);
+                              params_.effective_stack, bets, 0, true, false);
 }
 
 std::unique_ptr<GameTreeNode> GameTreeBuilder::make_terminal(
@@ -68,7 +68,7 @@ std::unique_ptr<GameTreeNode> GameTreeBuilder::make_terminal(
 }
 
 std::unique_ptr<GameTreeNode> GameTreeBuilder::build_chance_node(
-    Street next_street, double pot, double stack)
+    Street next_street, double pot, double stack, bool is_donk)
 {
     auto node = std::make_unique<GameTreeNode>();
     node->type = NodeType::CHANCE;
@@ -78,7 +78,8 @@ std::unique_ptr<GameTreeNode> GameTreeBuilder::build_chance_node(
     total_node_count_++;
 
     double bets[2] = {0, 0};
-    auto child = build_action_node(0, next_street, pot, stack, bets, 0, true);
+    // OOP (player 0) always acts first on new street
+    auto child = build_action_node(0, next_street, pot, stack, bets, 0, true, is_donk);
     node->children.push_back(std::move(child));
 
     return node;
@@ -86,7 +87,7 @@ std::unique_ptr<GameTreeNode> GameTreeBuilder::build_chance_node(
 
 std::vector<Action> GameTreeBuilder::generate_actions(
     int acting_player, Street street, double pot, double stack,
-    const double bets[2], int num_raises, bool can_check)
+    const double bets[2], int num_raises, bool can_check, bool is_donk)
 {
     std::vector<Action> actions;
     
@@ -99,6 +100,9 @@ std::vector<Action> GameTreeBuilder::generate_actions(
         return actions; // all-in already, should be terminal
     }
 
+    // Get this player's config for this street
+    const auto& config = params_.get_bet_config(street, acting_player);
+
     if (to_call > 0.001) {
         // Facing a bet/raise
         actions.push_back({ActionType::FOLD, 0});
@@ -110,7 +114,6 @@ std::vector<Action> GameTreeBuilder::generate_actions(
             actions.push_back({ActionType::CALL, to_call});
             
             if (num_raises < params_.max_raises_per_street) {
-                const auto& config = params_.get_bet_config(street);
                 double pot_after_call = pot + to_call;
                 
                 for (double frac : config.raise_sizes) {
@@ -150,13 +153,17 @@ std::vector<Action> GameTreeBuilder::generate_actions(
             }
         }
     } else {
-        // No bet to call
+        // No bet to call — opening action
         if (can_check) {
             actions.push_back({ActionType::CHECK, 0});
         }
         
-        const auto& config = params_.get_bet_config(street);
-        for (double frac : config.bet_sizes) {
+        // Choose bet sizes: use donk_sizes if this is a donk situation and they are configured
+        const auto& open_sizes = (is_donk && !config.donk_sizes.empty()) 
+                                  ? config.donk_sizes 
+                                  : config.bet_sizes;
+
+        for (double frac : open_sizes) {
             double bet_amount = pot * frac;
             bet_amount = std::round(bet_amount * 100) / 100.0;
             
@@ -192,7 +199,7 @@ std::vector<Action> GameTreeBuilder::generate_actions(
 
 std::unique_ptr<GameTreeNode> GameTreeBuilder::build_action_node(
     int acting_player, Street street, double pot, double stack,
-    double bets[2], int num_raises, bool can_check)
+    double bets[2], int num_raises, bool can_check, bool is_donk)
 {
     // Check if this player is already all-in
     double remaining = stack - bets[acting_player];
@@ -212,7 +219,8 @@ std::unique_ptr<GameTreeNode> GameTreeBuilder::build_action_node(
     node->node_index = player_node_count_++;
     total_node_count_++;
 
-    node->actions = generate_actions(acting_player, street, pot, stack, bets, num_raises, can_check);
+    // is_donk only applies to the first player opening on a new street
+    node->actions = generate_actions(acting_player, street, pot, stack, bets, num_raises, can_check, is_donk);
 
     // If no actions are possible (shouldn't happen normally), make terminal
     if (node->actions.empty()) {
@@ -238,12 +246,13 @@ std::unique_ptr<GameTreeNode> GameTreeBuilder::build_action_node(
                         node->children.push_back(make_terminal(pot, false, -1));
                     } else {
                         Street next = static_cast<Street>(static_cast<int>(street) + 1);
-                        node->children.push_back(build_chance_node(next, pot, stack));
+                        // Both checked: no aggressor, not a donk
+                        node->children.push_back(build_chance_node(next, pot, stack, false));
                     }
                 } else {
-                    // OOP checks, IP acts
+                    // OOP checks, IP acts (not a donk for subsequent actions)
                     node->children.push_back(
-                        build_action_node(other_player, street, pot, stack, new_bets, num_raises, true));
+                        build_action_node(other_player, street, pot, stack, new_bets, num_raises, true, false));
                 }
                 break;
             }
@@ -261,7 +270,10 @@ std::unique_ptr<GameTreeNode> GameTreeBuilder::build_action_node(
                     node->children.push_back(make_terminal(new_pot, false, -1));
                 } else {
                     Street next = static_cast<Street>(static_cast<int>(street) + 1);
-                    node->children.push_back(build_chance_node(next, new_pot, stack));
+                    // Donk detection: if OOP (player 0) called, IP was the aggressor.
+                    // On the next street, OOP acts first — that's a donk bet situation.
+                    bool donk_next = (acting_player == 0);
+                    node->children.push_back(build_chance_node(next, new_pot, stack, donk_next));
                 }
                 break;
             }
@@ -270,9 +282,10 @@ std::unique_ptr<GameTreeNode> GameTreeBuilder::build_action_node(
                 new_bets[acting_player] += action.amount;
                 double new_pot = pot + action.amount;
 
+                // After a bet/raise, opponent responds — no donk for the response
                 node->children.push_back(
                     build_action_node(other_player, street, new_pot, stack,
-                                      new_bets, num_raises + 1, false));
+                                      new_bets, num_raises + 1, false, false));
                 break;
             }
             case ActionType::ALLIN: {
@@ -283,7 +296,7 @@ std::unique_ptr<GameTreeNode> GameTreeBuilder::build_action_node(
                 // Opponent faces a bet, they can fold or call
                 node->children.push_back(
                     build_action_node(other_player, street, new_pot, stack,
-                                      new_bets, num_raises + 1, false));
+                                      new_bets, num_raises + 1, false, false));
                 break;
             }
         }

@@ -32,12 +32,10 @@ Options:
   --ip-range <range>    IP player range (e.g., "TT+,ATs+,KQs")
   --iterations <n>      Number of CFR iterations (default: 200)
   --threads <n>         Number of threads (default: 1)
-  --bet-sizes <sizes>   Bet sizes as % of pot (e.g., "33,67,100")
-  --raise-sizes <sizes> Raise sizes as % of pot (e.g., "50,100")
-  --allin-threshold <f>  All-in threshold (default: 0.67). If a bet leaves less
-                         than f * pot remaining, promote to all-in. Set 0 to disable.
-  --accuracy <pct>       Target exploitability (% of pot). Solver halts early when
-                         reached. (default: 0.5). Set 0 to disable.
+  --bet-sizes <sizes>   Bet sizes as % of pot for all players/streets (e.g., "33,67,100")
+  --raise-sizes <sizes> Raise sizes as % of pot for all players/streets (e.g., "50,100")
+  --allin-threshold <f> All-in threshold (default: 0.67). Set 0 to disable.
+  --accuracy <pct>      Target exploitability % of pot (default: 0.5). Set 0 to disable.
   --output <file>       Output file for JSON results
   --interactive         Start in interactive mode
   --help                Show this help
@@ -84,14 +82,19 @@ bool CLI::parse_args(int argc, char* argv[]) {
             solver_config_.num_threads = std::stoi(argv[++i]);
         } else if (arg == "--bet-sizes" && i + 1 < argc) {
             auto sizes = parse_bet_sizes(argv[++i]);
-            game_params_.flop_bet_config.bet_sizes = sizes;
-            game_params_.turn_bet_config.bet_sizes = sizes;
-            game_params_.river_bet_config.bet_sizes = sizes;
+            // Set for both OOP and IP on all streets
+            for (int p = 0; p < 2; ++p) {
+                game_params_.flop_config[p].bet_sizes = sizes;
+                game_params_.turn_config[p].bet_sizes = sizes;
+                game_params_.river_config[p].bet_sizes = sizes;
+            }
         } else if (arg == "--raise-sizes" && i + 1 < argc) {
             auto sizes = parse_bet_sizes(argv[++i]);
-            game_params_.flop_bet_config.raise_sizes = sizes;
-            game_params_.turn_bet_config.raise_sizes = sizes;
-            game_params_.river_bet_config.raise_sizes = sizes;
+            for (int p = 0; p < 2; ++p) {
+                game_params_.flop_config[p].raise_sizes = sizes;
+                game_params_.turn_config[p].raise_sizes = sizes;
+                game_params_.river_config[p].raise_sizes = sizes;
+            }
         } else if (arg == "--output" && i + 1 < argc) {
             output_file_ = argv[++i];
         } else if ((arg == "--allin-threshold" || arg == "--allin_threshold") && i + 1 < argc) {
@@ -308,6 +311,8 @@ void CLI::handle_command(const std::string& line) {
         cmd_set_range(0, args);
     } else if (cmd == "ip_range" || cmd == "set_ip_range") {
         cmd_set_range(1, args);
+    } else if (cmd == "set_bet_sizes") {
+        cmd_set_sizing(args);
     } else if (cmd == "flop_bet_sizes") {
         cmd_set_bet_sizes(Street::FLOP, args);
     } else if (cmd == "turn_bet_sizes") {
@@ -387,22 +392,108 @@ void CLI::cmd_set_range(int player, const std::string& args) {
     }
 }
 
+// Legacy: set bet sizes for both OOP and IP on a given street
 void CLI::cmd_set_bet_sizes(Street street, const std::string& args) {
     auto sizes = parse_bet_sizes(args);
-    auto& config = const_cast<BetConfig&>(game_params_.get_bet_config(street));
-    config.bet_sizes = sizes;
+    int s = static_cast<int>(street);
+    BetConfig* configs[] = { game_params_.flop_config, game_params_.turn_config, game_params_.river_config };
+    configs[s - 1][0].bet_sizes = sizes;  // OOP
+    configs[s - 1][1].bet_sizes = sizes;  // IP
     
-    std::cout << "Bet sizes set to: ";
-    for (double s : sizes) std::cout << (s * 100) << "% ";
+    std::cout << "Bet sizes set (both players) to: ";
+    for (double sz : sizes) std::cout << (sz * 100) << "% ";
     std::cout << std::endl;
 }
 
+// Legacy: set raise sizes for both OOP and IP on a given street
 void CLI::cmd_set_raise_sizes(Street street, const std::string& args) {
     auto sizes = parse_bet_sizes(args);
-    auto& config = const_cast<BetConfig&>(game_params_.get_bet_config(street));
-    config.raise_sizes = sizes;
+    int s = static_cast<int>(street);
+    BetConfig* configs[] = { game_params_.flop_config, game_params_.turn_config, game_params_.river_config };
+    configs[s - 1][0].raise_sizes = sizes;  // OOP
+    configs[s - 1][1].raise_sizes = sizes;  // IP
     
-    std::cout << "Raise sizes set to: ";
+    std::cout << "Raise sizes set (both players) to: ";
+    for (double sz : sizes) std::cout << (sz * 100) << "% ";
+    std::cout << std::endl;
+}
+
+// Unified command: set_bet_sizes <player>,<street>,<type>,<sizes...>
+// Example: set_bet_sizes oop,flop,bet,33,67,100
+//          set_bet_sizes ip,river,raise,60,100
+//          set_bet_sizes oop,turn,donk,50
+void CLI::cmd_set_sizing(const std::string& args) {
+    // Parse comma-separated tokens
+    std::vector<std::string> tokens;
+    std::istringstream iss(args);
+    std::string token;
+    while (std::getline(iss, token, ',')) {
+        // Trim whitespace
+        token.erase(0, token.find_first_not_of(" \t"));
+        token.erase(token.find_last_not_of(" \t") + 1);
+        std::transform(token.begin(), token.end(), token.begin(), ::tolower);
+        tokens.push_back(token);
+    }
+
+    if (tokens.size() < 4) {
+        std::cerr << "Usage: set_bet_sizes <player>,<street>,<type>,<size1>[,<size2>,...]\n"
+                  << "  player: oop, ip\n"
+                  << "  street: flop, turn, river\n"
+                  << "  type:   bet, raise, donk\n"
+                  << "  sizes:  as % of pot (e.g., 33,67,100)\n"
+                  << "Example: set_bet_sizes oop,flop,bet,33,67,100\n"
+                  << "         set_bet_sizes oop,river,donk,50\n";
+        return;
+    }
+
+    // Parse player
+    int player = -1;
+    if (tokens[0] == "oop") player = 0;
+    else if (tokens[0] == "ip") player = 1;
+    else {
+        std::cerr << "Unknown player '" << tokens[0] << "'. Use 'oop' or 'ip'.\n";
+        return;
+    }
+
+    // Parse street
+    Street street;
+    if (tokens[1] == "flop") street = Street::FLOP;
+    else if (tokens[1] == "turn") street = Street::TURN;
+    else if (tokens[1] == "river") street = Street::RIVER;
+    else {
+        std::cerr << "Unknown street '" << tokens[1] << "'. Use 'flop', 'turn', or 'river'.\n";
+        return;
+    }
+
+    // Parse type
+    std::string type = tokens[2];
+    if (type != "bet" && type != "raise" && type != "donk") {
+        std::cerr << "Unknown type '" << type << "'. Use 'bet', 'raise', or 'donk'.\n";
+        return;
+    }
+
+    // Parse sizes (from token[3] onwards)
+    std::vector<double> sizes;
+    for (size_t i = 3; i < tokens.size(); ++i) {
+        try {
+            sizes.push_back(std::stod(tokens[i]) / 100.0);
+        } catch (...) {
+            std::cerr << "Invalid size value: " << tokens[i] << "\n";
+            return;
+        }
+    }
+
+    // Apply
+    auto& config = game_params_.get_bet_config_mut(street, player);
+    if (type == "bet") {
+        config.bet_sizes = sizes;
+    } else if (type == "raise") {
+        config.raise_sizes = sizes;
+    } else if (type == "donk") {
+        config.donk_sizes = sizes;
+    }
+
+    std::cout << tokens[0] << " " << tokens[1] << " " << type << " sizes set to: ";
     for (double s : sizes) std::cout << (s * 100) << "% ";
     std::cout << std::endl;
 }
@@ -505,12 +596,24 @@ Available commands:
   stack <amount>         Set effective stack (e.g., stack 200)
   oop_range <range>      Set OOP range (e.g., oop_range AA,KK,QQ,AKs)
   ip_range <range>       Set IP range (e.g., ip_range TT+,ATs+,KQs)
-  flop_bet_sizes <pcts>  Set flop bet sizes in % (e.g., flop_bet_sizes 33,67,100)
-  turn_bet_sizes <pcts>  Set turn bet sizes in %
-  river_bet_sizes <pcts> Set river bet sizes in %
+
+  --- Per-player bet sizing (recommended) ---
+  set_bet_sizes <player>,<street>,<type>,<sizes>
+    player: oop, ip
+    street: flop, turn, river
+    type:   bet, raise, donk
+    Example: set_bet_sizes oop,flop,bet,33,67,100
+             set_bet_sizes ip,river,raise,60,100
+             set_bet_sizes oop,turn,donk,50
+
+  --- Legacy bet sizing (sets both players) ---
+  flop_bet_sizes <pcts>    Set flop bet sizes in %
+  turn_bet_sizes <pcts>    Set turn bet sizes in %
+  river_bet_sizes <pcts>   Set river bet sizes in %
   flop_raise_sizes <pcts>  Set flop raise sizes in %
   turn_raise_sizes <pcts>  Set turn raise sizes in %
   river_raise_sizes <pcts> Set river raise sizes in %
+
   iterations <n>         Set number of iterations (e.g., iterations 500)
   threads <n>            Set number of threads
   allin_threshold <f>    Set all-in threshold (e.g., allin_threshold 0.67)

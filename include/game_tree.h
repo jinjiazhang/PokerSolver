@@ -9,7 +9,7 @@ namespace poker {
 
 // ============================================================================
 // Game Tree for No-Limit Texas Hold'em
-// Supports custom bet sizing on each street
+// Supports custom bet sizing per player per street, including donk bets
 // ============================================================================
 
 enum class NodeType : uint8_t {
@@ -77,11 +77,12 @@ struct GameTreeNode {
 };
 
 // ============================================================================
-// Bet sizing configuration
+// Bet sizing configuration (per player per street)
 // ============================================================================
 struct BetConfig {
     std::vector<double> bet_sizes;   // as fraction of pot (e.g., 0.33, 0.5, 0.75, 1.0)
     std::vector<double> raise_sizes; // as fraction of pot
+    std::vector<double> donk_sizes;  // donk bet sizes (OOP betting into previous-street aggressor)
     bool add_allin = true;           // always include all-in option
 
     // Default aggressive config
@@ -89,6 +90,7 @@ struct BetConfig {
         BetConfig cfg;
         cfg.bet_sizes  = {0.33, 0.67, 1.0};
         cfg.raise_sizes = {0.5, 1.0};
+        // donk_sizes empty by default → falls back to bet_sizes
         cfg.add_allin = true;
         return cfg;
     }
@@ -102,13 +104,11 @@ struct GameParams {
     double effective_stack = 100.0; // effective stack size
     Board  board;                // community cards
 
-    // Bet sizing for each street (flop, turn, river)
-    BetConfig flop_bet_config;
-    BetConfig turn_bet_config;
-    BetConfig river_bet_config;
-
-    // OOP acts first, IP acts second
-    // IP has position advantage
+    // Bet sizing: separate config per player (0=OOP, 1=IP) per street
+    // OOP acts first, IP acts second. IP has position advantage.
+    BetConfig flop_config[2];    // [0]=OOP, [1]=IP
+    BetConfig turn_config[2];    // [0]=OOP, [1]=IP
+    BetConfig river_config[2];   // [0]=OOP, [1]=IP
 
     // Max number of raises per street
     int max_raises_per_street = 4;
@@ -120,17 +120,29 @@ struct GameParams {
     double allin_threshold = 0.67;
 
     GameParams() {
-        flop_bet_config  = BetConfig::default_config();
-        turn_bet_config  = BetConfig::default_config();
-        river_bet_config = BetConfig::default_config();
+        auto def = BetConfig::default_config();
+        flop_config[0] = flop_config[1] = def;
+        turn_config[0] = turn_config[1] = def;
+        river_config[0] = river_config[1] = def;
     }
 
-    const BetConfig& get_bet_config(Street street) const {
+    // Get bet config for a specific street and player
+    const BetConfig& get_bet_config(Street street, int player) const {
         switch (street) {
-            case Street::FLOP:  return flop_bet_config;
-            case Street::TURN:  return turn_bet_config;
-            case Street::RIVER: return river_bet_config;
-            default: return flop_bet_config;
+            case Street::FLOP:  return flop_config[player];
+            case Street::TURN:  return turn_config[player];
+            case Street::RIVER: return river_config[player];
+            default: return flop_config[player];
+        }
+    }
+
+    // Mutable access for CLI configuration
+    BetConfig& get_bet_config_mut(Street street, int player) {
+        switch (street) {
+            case Street::FLOP:  return flop_config[player];
+            case Street::TURN:  return turn_config[player];
+            case Street::RIVER: return river_config[player];
+            default: return flop_config[player];
         }
     }
 };
@@ -162,12 +174,14 @@ private:
         double stack,
         double bets[2],
         int num_raises,
-        bool can_check);
+        bool can_check,
+        bool is_donk = false);
 
     std::unique_ptr<GameTreeNode> build_chance_node(
         Street next_street,
         double pot,
-        double stack);
+        double stack,
+        bool is_donk = false);
 
     std::unique_ptr<GameTreeNode> make_terminal(
         double pot, bool is_fold, int folder);
@@ -179,7 +193,8 @@ private:
         double stack,
         const double bets[2],
         int num_raises,
-        bool can_check);
+        bool can_check,
+        bool is_donk = false);
 };
 
 } // namespace poker
