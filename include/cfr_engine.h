@@ -158,22 +158,30 @@ struct RiverSortedRange {
 class CFRSolver {
 public:
     struct Config {
-        int num_iterations = 200;
-        int num_threads = 1;
-        bool use_dcfr = true;
-        bool use_isomorphism = true;   // enable suit isomorphism
-        bool use_mccfr = false;        // enable Monte Carlo CFR (External Sampling)
-        bool print_progress = true;
-        int print_interval = 10;
-        
-        // Early stopping: halt when exploitability (% of pot) drops below this.
-        // Set to 0 or negative to disable. Default 0.5%.
-        double target_exploitability = 0.5;
-        
-        // DCFR parameters
-        double dcfr_alpha = 1.5;   // positive regret discounting
-        double dcfr_beta  = 0.0;   // negative regret discounting
-        double dcfr_gamma = 2.0;   // strategy sum discounting
+        int num_iterations;
+        int num_threads;
+        bool use_dcfr;
+        bool use_isomorphism;
+        bool use_mccfr;
+        bool print_progress;
+        int print_interval;
+        double target_exploitability;
+        double dcfr_alpha;
+        double dcfr_beta;
+        double dcfr_gamma;
+
+        Config() 
+            : num_iterations(200),
+              num_threads(1),
+              use_dcfr(true),
+              use_isomorphism(true),
+              use_mccfr(false),
+              print_progress(true),
+              print_interval(10),
+              target_exploitability(0.5),
+              dcfr_alpha(1.5),
+              dcfr_beta(0.0),
+              dcfr_gamma(2.0) {}
     };
 
     CFRSolver(const GameParams& game_params, const Config& config = Config());
