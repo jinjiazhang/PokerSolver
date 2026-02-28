@@ -113,6 +113,12 @@ struct GameParams {
     // Max number of raises per street
     int max_raises_per_street = 4;
 
+    // All-in threshold: if a bet/raise would leave the player with
+    // remaining stack < threshold * pot_after_action, convert to all-in.
+    // This prevents tiny-stack branches from bloating the tree.
+    // Set to 0.0 to disable. Default 0.67 matches PioSolver convention.
+    double allin_threshold = 0.67;
+
     GameParams() {
         flop_bet_config  = BetConfig::default_config();
         turn_bet_config  = BetConfig::default_config();

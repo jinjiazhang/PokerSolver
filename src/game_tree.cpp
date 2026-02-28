@@ -123,7 +123,14 @@ std::vector<Action> GameTreeBuilder::generate_actions(
                     if (raise_total < min_raise) raise_total = min_raise;
                     
                     if (raise_total < remaining - 0.01) {
-                        actions.push_back({ActionType::RAISE, raise_total});
+                        // All-in threshold: if remaining after raise is small, promote to all-in
+                        double left_after = remaining - raise_total;
+                        double pot_after = pot + raise_total;
+                        if (params_.allin_threshold > 0.0 && left_after < params_.allin_threshold * pot_after) {
+                            // Promote to all-in (will be added below)
+                        } else {
+                            actions.push_back({ActionType::RAISE, raise_total});
+                        }
                     }
                 }
                 
@@ -154,7 +161,14 @@ std::vector<Action> GameTreeBuilder::generate_actions(
             bet_amount = std::round(bet_amount * 100) / 100.0;
             
             if (bet_amount > 0.01 && bet_amount < remaining - 0.01) {
-                actions.push_back({ActionType::BET, bet_amount});
+                // All-in threshold: if remaining after bet is small, promote to all-in
+                double left_after = remaining - bet_amount;
+                double pot_after = pot + bet_amount;
+                if (params_.allin_threshold > 0.0 && left_after < params_.allin_threshold * pot_after) {
+                    // Promote to all-in (will be added below)
+                } else {
+                    actions.push_back({ActionType::BET, bet_amount});
+                }
             }
         }
         
