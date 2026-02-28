@@ -36,6 +36,8 @@ Options:
   --raise-sizes <sizes> Raise sizes as % of pot (e.g., "50,100")
   --allin-threshold <f>  All-in threshold (default: 0.67). If a bet leaves less
                          than f * pot remaining, promote to all-in. Set 0 to disable.
+  --accuracy <pct>       Target exploitability (% of pot). Solver halts early when
+                         reached. (default: 0.5). Set 0 to disable.
   --output <file>       Output file for JSON results
   --interactive         Start in interactive mode
   --help                Show this help
@@ -94,6 +96,8 @@ bool CLI::parse_args(int argc, char* argv[]) {
             output_file_ = argv[++i];
         } else if ((arg == "--allin-threshold" || arg == "--allin_threshold") && i + 1 < argc) {
             game_params_.allin_threshold = std::stod(argv[++i]);
+        } else if (arg == "--accuracy" && i + 1 < argc) {
+            solver_config_.target_exploitability = std::stod(argv[++i]);
         } else {
             std::cerr << "Unknown option: " << arg << std::endl;
             print_usage();
@@ -185,6 +189,7 @@ void CLI::run() {
     std::cout << "Pot:   " << game_params_.initial_pot << std::endl;
     std::cout << "Stack: " << game_params_.effective_stack << std::endl;
     std::cout << "All-in threshold: " << game_params_.allin_threshold << std::endl;
+    std::cout << "Accuracy target:  " << solver_config_.target_exploitability << "%" << std::endl;
     std::cout << "OOP range: " << oop_range.size() << " combos" << std::endl;
     std::cout << "IP range:  " << ip_range.size() << " combos" << std::endl;
     std::cout << "Iterations: " << solver_config_.num_iterations << std::endl;
@@ -327,6 +332,13 @@ void CLI::handle_command(const std::string& line) {
             std::cout << "All-in threshold set to: " << game_params_.allin_threshold << std::endl;
         } catch (...) {
             std::cerr << "Invalid threshold value: " << args << std::endl;
+        }
+    } else if (cmd == "accuracy" || cmd == "set_accuracy") {
+        try {
+            solver_config_.target_exploitability = std::stod(args);
+            std::cout << "Target exploitability set to: " << solver_config_.target_exploitability << "%" << std::endl;
+        } catch (...) {
+            std::cerr << "Invalid accuracy value: " << args << std::endl;
         }
     } else if (cmd == "export") {
         cmd_export(args);
@@ -502,6 +514,7 @@ Available commands:
   iterations <n>         Set number of iterations (e.g., iterations 500)
   threads <n>            Set number of threads
   allin_threshold <f>    Set all-in threshold (e.g., allin_threshold 0.67)
+  accuracy <pct>         Set target exploitability % (e.g., accuracy 0.5)
   solve                  Start solving
   export <file>          Export results to JSON
   help                   Show this help

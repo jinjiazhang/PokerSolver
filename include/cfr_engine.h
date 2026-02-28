@@ -144,6 +144,10 @@ public:
         bool print_progress = true;
         int print_interval = 10;
         
+        // Early stopping: halt when exploitability (% of pot) drops below this.
+        // Set to 0 or negative to disable. Default 0.5%.
+        double target_exploitability = 0.5;
+        
         // DCFR parameters
         double dcfr_alpha = 1.5;   // positive regret discounting
         double dcfr_beta  = 0.0;   // negative regret discounting

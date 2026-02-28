@@ -303,10 +303,15 @@ void CFRSolver::solve() {
     if (isomorphism_enabled_) {
         std::cout << ", isomorphism";
     }
+    if (config_.target_exploitability > 0) {
+        std::cout << ", target " << config_.target_exploitability << "%";
+    }
     std::cout << ")...\n";
     std::cout << std::string(60, '=') << std::endl;
 
     auto total_start = std::chrono::high_resolution_clock::now();
+    bool converged = false;
+    int final_iter = config_.num_iterations;
 
     for (int iter = 1; iter <= config_.num_iterations; ++iter) {
         auto iter_start = std::chrono::high_resolution_clock::now();
@@ -338,6 +343,17 @@ void CFRSolver::solve() {
                       << " | ETA " << std::setprecision(0) << eta << "s"
                       << " | exploit " << std::setprecision(3) << exploit << "%"
                       << std::endl;
+            
+            // Early stopping: check if exploitability is below target
+            if (config_.target_exploitability > 0 && 
+                std::abs(exploit) < config_.target_exploitability) {
+                std::cout << "  >>> Converged! Exploitability " 
+                          << std::setprecision(3) << std::abs(exploit) 
+                          << "% < target " << config_.target_exploitability << "%\n";
+                converged = true;
+                final_iter = iter;
+                break;
+            }
         }
     }
 
@@ -346,9 +362,12 @@ void CFRSolver::solve() {
 
     std::cout << std::string(60, '=') << std::endl;
     std::cout << "Solving complete in " << std::fixed << std::setprecision(2) 
-              << total_s << " seconds";
+              << total_s << " seconds (" << final_iter << " iterations)";
     if (use_parallel) {
         std::cout << " (" << num_threads << " threads)";
+    }
+    if (converged) {
+        std::cout << " [converged]";
     }
     std::cout << std::endl;
 }
