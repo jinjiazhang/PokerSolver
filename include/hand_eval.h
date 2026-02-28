@@ -58,15 +58,8 @@ public:
     static const char* category_name(int cat);
 
 private:
-    // Lookup tables
-    // flush_table: indexed by bit pattern of 5 ranks -> hand rank
+    // flush_table: indexed by rank bit pattern of 5 to 7 ranks -> hand rank
     std::array<uint16_t, 8192>  flush_table_;
-    // unique5_table: indexed by a hash of 5 unique ranks -> hand rank
-    std::array<uint16_t, 8192>  unique5_table_;
-    // pairs_table: indexed by rank pattern hash -> hand rank for paired boards
-    // Uses a hash table for fast lookup
-    static constexpr int PAIRS_TABLE_SIZE = 1 << 16;
-    std::array<uint16_t, PAIRS_TABLE_SIZE> pairs_table_;
 
     void init_tables();
     uint16_t eval_5cards(int c0, int c1, int c2, int c3, int c4) const;
